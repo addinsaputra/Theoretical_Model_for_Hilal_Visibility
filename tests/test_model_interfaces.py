@@ -198,6 +198,7 @@ class IntegrationAndExportTests(unittest.TestCase):
         obs = dict(no=1, nama='Uji Semarang', tanggal='2023-03-22', lat=-6.917,
                    lon=110.348, elv=89, bulan_hijri=9, tahun_hijri=1444,
                    bias_t=0, bias_rh=0, observed=True)
+        cls.obs = obs
         with patch('core_multi_location.HilalVisibilityCalculator') as calculator:
             calculator.return_value.jalankan_perhitungan_lengkap.return_value = cls.hasil
             with contextlib.redirect_stdout(io.StringIO()):
@@ -254,6 +255,9 @@ class IntegrationAndExportTests(unittest.TestCase):
                 self.assertEqual(float(row[f'moon_semidiameter_deg_{suffix}']), result['moon_semidiameter'])
                 self.assertEqual(float(row[f'moon_distance_km_{suffix}']), result['moon_distance_km'])
             self.assertEqual(float(row['Phase_Angle_BT']), self.hasil['optimal_result_tel']['phase_angle'])
+            self.assertEqual(float(row['P_Sunset']), self.hasil['pressure'])
+            self.assertEqual(float(row['P_NE_Optimal']), self.hasil['optimal_result_ne']['pressure'])
+            self.assertEqual(float(row['P_Tel_Optimal']), self.hasil['optimal_result_tel']['pressure'])
             diagnostic = load_observation_data(str(path)).iloc[0]
             self.assertEqual(diagnostic['Moon Semidiameter (deg)'],
                              self.hasil['optimal_result_tel']['moon_semidiameter'])
@@ -276,7 +280,7 @@ class IntegrationAndExportTests(unittest.TestCase):
             wb = load_workbook(path)
             try:
                 ws = wb['Hasil Observasi']
-                self.assertEqual(ws.max_column, 57)
+                self.assertEqual(ws.max_column, 60)
                 self.assertAlmostEqual(ws.cell(3, 49).value, self.hasil['extinction_mag_v'])
                 self.assertAlmostEqual(ws.cell(3, 50).value, self.hasil['transmission_v'])
                 self.assertAlmostEqual(ws.cell(3, 53).value,
@@ -287,6 +291,71 @@ class IntegrationAndExportTests(unittest.TestCase):
                                              rel_tol=1e-14))
                 self.assertAlmostEqual(ws.cell(3, 57).value,
                                        self.hasil['optimal_result_tel']['moon_semidiameter'])
+                for ci, label, expected in (
+                    (58, 'P_Sunset (hPa)', self.hasil['pressure']),
+                    (59, 'P_NE_Optimal (hPa)', self.hasil['optimal_result_ne']['pressure']),
+                    (60, 'P_Tel_Optimal (hPa)', self.hasil['optimal_result_tel']['pressure']),
+                ):
+                    self.assertEqual(ws.cell(2, ci).value, label)
+                    self.assertAlmostEqual(ws.cell(3, ci).value, expected)
+                    self.assertEqual(ws.cell(3, ci).number_format, '0.00')
+            finally:
+                wb.close()
+
+    def test_batch_pressure_exports_keep_distinct_values_at_each_time(self):
+        # Different values expose accidentally reusing sunset pressure at both optima.
+        calculation = {
+            **self.hasil,
+            'pressure': 1001.123456,
+            'optimal_result_ne': {**self.hasil['optimal_result_ne'], 'pressure': 1002.234567},
+            'optimal_result_tel': {**self.hasil['optimal_result_tel'], 'pressure': 1003.345678},
+        }
+        with patch('core_multi_location.HilalVisibilityCalculator') as calculator:
+            calculator.return_value.jalankan_perhitungan_lengkap.return_value = calculation
+            with patch('core_multi_location.CALC_MODE', 'optimal'), contextlib.redirect_stdout(io.StringIO()):
+                result = run_single_observation(self.obs, verbose=False)
+        self.assertTrue(result['success'])
+        self.assertEqual((result['pressure'], result['opt_ne_pressure'], result['opt_tel_pressure']),
+                         (1001.123456, 1002.234567, 1003.345678))
+        with tempfile.TemporaryDirectory() as folder:
+            csv_path, xlsx_path = Path(folder) / 'pressure.csv', Path(folder) / 'pressure.xlsx'
+            with contextlib.redirect_stdout(io.StringIO()):
+                save_to_csv([result], str(csv_path))
+                save_to_excel([result], str(xlsx_path))
+            with csv_path.open(encoding='utf-8-sig', newline='') as stream:
+                row = next(csv.DictReader(stream))
+            self.assertEqual([float(row[name]) for name in ('P_Sunset', 'P_NE_Optimal', 'P_Tel_Optimal')],
+                             [1001.123456, 1002.234567, 1003.345678])
+            wb = load_workbook(xlsx_path)
+            try:
+                for ci, expected in zip((58, 59, 60), (1001.123456, 1002.234567, 1003.345678)):
+                    self.assertAlmostEqual(wb['Hasil Observasi'].cell(3, ci).value, expected, places=10)
+            finally:
+                wb.close()
+
+    def test_sunset_mode_leaves_optimal_pressures_blank(self):
+        with patch('core_multi_location.HilalVisibilityCalculator') as calculator:
+            calculator.return_value.jalankan_perhitungan_lengkap.return_value = self.hasil
+            with patch('core_multi_location.CALC_MODE', 'sunset'), contextlib.redirect_stdout(io.StringIO()):
+                result = run_single_observation(self.obs, verbose=False)
+        self.assertTrue(result['success'])
+        self.assertEqual(result['pressure'], self.hasil['pressure'])
+        self.assertIsNone(result['opt_ne_pressure'])
+        self.assertIsNone(result['opt_tel_pressure'])
+        with tempfile.TemporaryDirectory() as folder:
+            csv_path, xlsx_path = Path(folder) / 'sunset.csv', Path(folder) / 'sunset.xlsx'
+            with contextlib.redirect_stdout(io.StringIO()):
+                save_to_csv([result], str(csv_path))
+                save_to_excel([result], str(xlsx_path))
+            with csv_path.open(encoding='utf-8-sig', newline='') as stream:
+                row = next(csv.DictReader(stream))
+            self.assertEqual(float(row['P_Sunset']), self.hasil['pressure'])
+            self.assertEqual(row['P_NE_Optimal'], '')
+            self.assertEqual(row['P_Tel_Optimal'], '')
+            wb = load_workbook(xlsx_path)
+            try:
+                self.assertIsNone(wb['Hasil Observasi'].cell(3, 59).value)
+                self.assertIsNone(wb['Hasil Observasi'].cell(3, 60).value)
             finally:
                 wb.close()
 

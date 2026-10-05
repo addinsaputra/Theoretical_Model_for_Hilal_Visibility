@@ -1,4 +1,9 @@
-"""Historical ECMWF IFS through Open-Meteo, with UTC hourly interpolation.
+"""ECMWF IFS HRES hourly archive through Open-Meteo (model ecmwf_ifs).
+
+The retrieval API is Historical Weather /v1/archive. Product identity follows
+the explicit model selector and the verified SDK response model, rather than
+the API endpoint's name. Analysis and Analysis Long-Window have separate model
+selectors in Open-Meteo. The IFS cycle is not exposed by this API response.
 
 RH and surface pressure are Open-Meteo derived variables. Temperature and
 pressure are downscaled to the requested site elevation; these are not raw
@@ -22,6 +27,12 @@ from retry_requests import retry
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 IFS_MODEL = "ecmwf_ifs"
+IFS_PRODUCT_NAME = "ECMWF IFS HRES 9 km (Open-Meteo ecmwf_ifs)"
+IFS_IDENTITY_REFERENCE = (
+    "https://github.com/open-meteo/open-meteo/blob/"
+    "1cd0eaa1ed97857772a6bd968bbe373bd23636f3/"
+    "Sources/App/Controllers/ForecastapiController.swift"
+)
 ATMOSPHERIC_VARIABLES = (
     "temperature_2m", "relative_humidity_2m", "surface_pressure", "dew_point_2m",
 )
@@ -180,6 +191,13 @@ def fetch_weather_with_info(
         info.update({
             "source": "Open-Meteo Historical Weather API", "endpoint": ARCHIVE_URL,
             "model": IFS_MODEL, "response_model_id": int(response.Model()),
+            "response_model_name": IFS_MODEL,
+            "product_name": IFS_PRODUCT_NAME,
+            "product_type": "ifs_hres_hourly_time_series",
+            "nominal_horizontal_resolution_km": 9,
+            "product_identity_reference": IFS_IDENTITY_REFERENCE,
+            "ifs_cycle": None,
+            "ifs_cycle_availability": "not exposed by this API response",
             "requested_latitude": latitude, "requested_longitude": longitude,
             "requested_elevation": elevation, "cell_selection": cell_selection,
             "requested_timezone": timezone, "time_axis_timezone": "UTC",
@@ -201,6 +219,8 @@ def fetch_weather_with_info(
             f"at ({latitude}, {longitude}): {exc}"
         ) from exc
     if print_info:
+        print(f"Product: {info['product_name']}; response model ID: {info['response_model_id']}")
+        print(f"API: {info['endpoint']}")
         print(f"Coordinates: {info['latitude']}°, {info['longitude']}°")
         print(f"Effective elevation: {info['elevation']} m asl")
         print(f"Timezone: {info['timezone']} ({info['timezone_abbreviation']}); dates stored in UTC")

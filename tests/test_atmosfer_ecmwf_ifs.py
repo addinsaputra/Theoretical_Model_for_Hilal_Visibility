@@ -92,6 +92,13 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(info['elevation'], info['requested_elevation'])
         self.assertNotIn('grid_elevation', info)
         self.assertEqual(info['units']['surface_pressure'], 'hPa')
+        self.assertEqual(info['model'], 'ecmwf_ifs')
+        self.assertEqual(info['response_model_name'], 'ecmwf_ifs')
+        self.assertEqual(info['response_model_id'], int(weather.Model.ecmwf_ifs))
+        self.assertEqual(info['product_name'], weather.IFS_PRODUCT_NAME)
+        self.assertEqual(info['product_type'], 'ifs_hres_hourly_time_series')
+        self.assertIsNone(info['ifs_cycle'])
+        self.assertIn('1cd0eaa', info['product_identity_reference'])
         self.assertEqual(table.attrs['weather_metadata'], info)
 
     def test_dataframe_wrapper_uses_shared_request_and_keeps_positional_arguments(self):
@@ -379,11 +386,14 @@ class FailureAndAuditExportTests(unittest.TestCase):
             self.assertEqual(row['Prediksi'], '')
             self.assertEqual(row['RH_Sunset'], '')
             self.assertEqual(row['Dm_Tel_BT'], '')
+            for name in ('P_Sunset', 'P_NE_Optimal', 'P_Tel_Optimal'):
+                self.assertEqual(row[name], '')
             wb = load_workbook(xlsx_path)
             try:
                 sheet = wb['Hasil Observasi']
                 self.assertEqual(sheet.cell(3, 48).value, 'ERROR')
                 self.assertTrue(all(sheet.cell(3, i).value is None for i in range(9, 47)))
+                self.assertTrue(all(sheet.cell(3, i).value is None for i in (58, 59, 60)))
             finally:
                 wb.close()
             for path in (csv_path, xlsx_path):

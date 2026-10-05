@@ -45,6 +45,7 @@ from core_crescent_visibility import (
     tentukan_timezone_indonesia,
 )
 from atmosphere_provenance import atmosphere_audit_record, save_atmosphere_provenance
+from atmosfer_ecmwf_ifs import ARCHIVE_URL, IFS_MODEL, IFS_PRODUCT_NAME
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -185,18 +186,19 @@ def _input_konfigurasi_interaktif():
 OBSERVATIONS = [
     # Sumber: data_keterlihatan_hilal_core.xlsx, Sheet1 (278 baris).
     # Urutan dan tanggal mengikuti Excel; visibilitas v=True, x=False.
-    # Bias lama dipertahankan untuk lokasi yang cocok; lokasi baru = 0.
+    # Bias T/RH = 0: baseline tanpa koreksi.
+    # Rerata bias jurnal belum divalidasi terhadap IFS dan lokasi ini.
 
     # Ramadhan 1443H (2022-04-02)
     (  1, "2022-04-02", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       9, 1443,  -1,   2, True),
+       9, 1443,   0,   0, True),
     (  2, "2022-04-02", "Dermaga Kokar - Alor",
       -8.160633661422654, 124.4469298628282, 6.0,
        9, 1443,   0,   0, True),
     (  3, "2022-04-02", "Kantor BMKG NTT - Kupang",
       -10.152721211412, 123.6084268386404, 46.0,
-       9, 1443,  -1,  -2, True),
+       9, 1443,   0,   0, True),
     (  4, "2022-04-02", "Pantai Wolulu - Kolaka",
       -4.437940163876542, 121.5180156752929, 1.0,
        9, 1443,   0,   0, True),
@@ -205,7 +207,7 @@ OBSERVATIONS = [
        9, 1443,   0,   0, True),
     (  6, "2022-04-02", "Tower Hilal Marana - Donggala",
       -0.578624, 119.7907213933992, 13.0,
-       9, 1443,  -4,  10, True),
+       9, 1443,   0,   0, True),
     (  7, "2022-04-02", "Bukit Persaudaraan Mauliru - Sumba Timur",
       -9.67563477316942, 120.295333443605, 68.0,
        9, 1443,   0,   0, True),
@@ -223,10 +225,10 @@ OBSERVATIONS = [
        9, 1443,   0,   0, False),
     ( 12, "2022-04-02", "POB Cibeas Pelabuhan Ratu - Sukabumi",
       -7.073954888421351, 106.5313851128172, 125.0,
-       9, 1443,   0,  -2, False),
+       9, 1443,   0,   0, False),
     ( 13, "2022-04-02", "Tower Hilal Meras - Manado",
       1.48033, 124.83367, 31.0,
-       9, 1443,  -1,   4, False),
+       9, 1443,   0,   0, False),
     ( 14, "2022-04-02", "Gedung Graha NU - Balikpapan",
       -1.214391502304469, 116.8573002444378, 68.0,
        9, 1443,   0,   0, False),
@@ -241,41 +243,41 @@ OBSERVATIONS = [
        9, 1443,   0,   0, False),
     ( 18, "2022-04-02", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-       9, 1443,  -1,   4, False),
+       9, 1443,   0,   0, False),
     ( 19, "2022-04-02", "POB Syekh Belabelu - Bantul",
       -8.016269183330273, 110.3234649137316, 46.0,
        9, 1443,   0,   0, False),
     ( 20, "2022-04-02", "Tower Hilal Ave Taduma - Ternate",
       0.7961631476438263, 127.2940983176842, 33.0,
-       9, 1443,  -1,   2, False),
+       9, 1443,   0,   0, False),
 
     # Zulqaidah 1443H (2022-05-31)
     ( 21, "2022-05-31", "Tower Hilal Marana - Donggala",
       -0.578624, 119.7907213933992, 13.0,
-      11, 1443,  -4,  10, True),
+      11, 1443,   0,   0, True),
     ( 22, "2022-05-31", "Hotel Mina Tanjung - Lombok Utara",
       -8.346996996074873, 116.1489666410537, 5.0,
-      11, 1443,  -1,   2, True),
+      11, 1443,   0,   0, True),
     ( 23, "2022-05-31", "Pantai Galesong - Takalar",
       -5.241962225688506, 119.3804270461404, 4.0,
       11, 1443,   0,   0, True),
     ( 24, "2022-05-31", "Kantor BMKG NTT - Kupang",
       -10.152721211412, 123.6084268386404, 46.0,
-      11, 1443,  -1,  -2, False),
+      11, 1443,   0,   0, False),
     ( 25, "2022-05-31", "Tower Hilal Ave Taduma - Ternate",
       0.7961631476438263, 127.2940983176842, 33.0,
-      11, 1443,  -1,   2, False),
+      11, 1443,   0,   0, False),
     ( 26, "2022-05-31", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-      11, 1443,  -1,   4, False),
+      11, 1443,   0,   0, False),
 
     # Muharram 1444H (2022-06-29)
     ( 27, "2022-06-29", "Tower Hilal Sulamu - Kupang",
       -10.04515269471165, 123.6061277641333, 15.0,
-       1, 1444,  -1,  -2, True),
+       1, 1444,   0,   0, True),
     ( 28, "2022-06-29", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-       1, 1444,  -1,   4, False),
+       1, 1444,   0,   0, False),
     ( 29, "2022-06-29", "Bukit Persaudaraan Mauliru - Sumba Timur",
       -9.67563477316942, 120.295333443605, 68.0,
        1, 1444,   0,   0, False),
@@ -292,7 +294,7 @@ OBSERVATIONS = [
        2, 1444,   0,   0, True),
     ( 33, "2022-08-28", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-       2, 1444,  -1,   4, True),
+       2, 1444,   0,   0, True),
     ( 34, "2022-08-28", "Bukit Persaudaraan Mauliru - Sumba Timur",
       -9.67563477316942, 120.295333443605, 68.0,
        2, 1444,   0,   0, True),
@@ -301,13 +303,13 @@ OBSERVATIONS = [
        2, 1444,   0,   0, True),
     ( 36, "2022-08-28", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       2, 1444,  -1,   2, True),
+       2, 1444,   0,   0, True),
     ( 37, "2022-08-28", "Dermaga Kokar - Alor",
       -8.160633661422654, 124.4469298628282, 6.0,
        2, 1444,   0,   0, True),
     ( 38, "2022-08-28", "Tower Hilal Sulamu - Kupang",
       -10.04515269471165, 123.6061277641333, 15.0,
-       2, 1444,  -1,  -2, True),
+       2, 1444,   0,   0, True),
     ( 39, "2022-08-28", "Pantai Patra Jasa - Badung",
       -8.739618909814585, 115.1609513837828, 4.0,
        2, 1444,   0,   0, False),
@@ -330,13 +332,13 @@ OBSERVATIONS = [
     # Rabiul Akhir 1444H (2022-10-26)
     ( 45, "2022-10-26", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       4, 1444,  -1,   2, True),
+       4, 1444,   0,   0, True),
     ( 46, "2022-10-26", "Tower Hilal Ave Taduma - Ternate",
       0.7961631476438263, 127.2940983176842, 33.0,
-       4, 1444,  -1,   2, True),
+       4, 1444,   0,   0, True),
     ( 47, "2022-10-26", "Tower Hilal Sulamu - Kupang",
       -10.04515269471165, 123.6061277641333, 15.0,
-       4, 1444,  -1,  -2, False),
+       4, 1444,   0,   0, False),
     ( 48, "2022-10-26", "Pantai Purus - Kota Padang",
       -0.9295313925782047, 100.3500354721508, 5.0,
        4, 1444,   0,   0, False),
@@ -347,13 +349,13 @@ OBSERVATIONS = [
        6, 1444,   0,   0, True),
     ( 50, "2022-12-24", "Tower Hilal Sulamu - Kupang",
       -10.04515269471165, 123.6061277641333, 15.0,
-       6, 1444,  -1,  -2, True),
+       6, 1444,   0,   0, True),
     ( 51, "2022-12-24", "Tower Hilal Ave Taduma - Ternate",
       0.7961631476438263, 127.2940983176842, 33.0,
-       6, 1444,  -1,   2, True),
+       6, 1444,   0,   0, True),
     ( 52, "2022-12-24", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       6, 1444,  -1,   2, False),
+       6, 1444,   0,   0, False),
     ( 53, "2022-12-24", "Pos Observasi Geofisika Lembang - Bandung",
       -6.826420320711056, 107.61856621984, 1258.0,
        6, 1444,   0,   0, False),
@@ -367,10 +369,10 @@ OBSERVATIONS = [
        8, 1444,   0,   0, True),
     ( 56, "2023-02-21", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       8, 1444,  -1,   2, False),
+       8, 1444,   0,   0, False),
     ( 57, "2023-02-21", "Kantor BMKG NTT - Kupang",
       -10.152721211412, 123.6084268386404, 46.0,
-       8, 1444,  -1,  -2, False),
+       8, 1444,   0,   0, False),
     ( 58, "2023-02-21", "Bukit Persaudaraan Mauliru - Sumba Timur",
       -9.67563477316942, 120.295333443605, 68.0,
        8, 1444,   0,   0, False),
@@ -378,16 +380,16 @@ OBSERVATIONS = [
     # Ramadhan 1444H (2023-03-22)
     ( 59, "2023-03-22", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       9, 1444,  -1,   2, True),
+       9, 1444,   0,   0, True),
     ( 60, "2023-03-22", "Tower Hilal Marana - Donggala",
       -0.578624, 119.7907213933992, 13.0,
-       9, 1444,  -4,  10, True),
+       9, 1444,   0,   0, True),
     ( 61, "2023-03-22", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-       9, 1444,  -1,   4, True),
+       9, 1444,   0,   0, True),
     ( 62, "2023-03-22", "Kantor BMKG NTT - Kupang",
       -10.152721211412, 123.6084268386404, 46.0,
-       9, 1444,  -1,  -2, False),
+       9, 1444,   0,   0, False),
     ( 63, "2023-03-22", "Gedung Kebudayaan Provinsi Sumatera Barat - Kota Padang",
       -0.9548158683661738, 100.3526701201944, 21.0,
        9, 1444,   0,   0, False),
@@ -404,7 +406,7 @@ OBSERVATIONS = [
        5, 1445,   0,   0, True),
     ( 67, "2023-11-14", "Kantor BMKG NTT - Kupang",
       -10.152721211412, 123.6084268386404, 46.0,
-       5, 1445,  -1,  -2, False),
+       5, 1445,   0,   0, False),
     ( 68, "2023-11-14", "POB Syekh Belabelu - Bantul",
       -8.016269183330273, 110.3234649137316, 46.0,
        5, 1445,   0,   0, False),
@@ -412,7 +414,7 @@ OBSERVATIONS = [
     # Rajab 1445H (2024-01-12)
     ( 69, "2024-01-12", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       7, 1445,  -1,   2, True),
+       7, 1445,   0,   0, True),
     ( 70, "2024-01-12", "Masjid Cakmarussalam Wakasihu - maluku Tengah",
       -3.75748166512398, 127.9366931385646, 15.0,
        7, 1445,   0,   0, True),
@@ -424,13 +426,13 @@ OBSERVATIONS = [
        7, 1445,   0,   0, True),
     ( 73, "2024-01-12", "POB Cibeas Pelabuhan Ratu - Sukabumi",
       -7.073954888421351, 106.5313851128172, 125.0,
-       7, 1445,   0,  -2, False),
+       7, 1445,   0,   0, False),
     ( 74, "2024-01-12", "Kantor BMKG NTT - Kupang",
       -10.152721211412, 123.6084268386404, 46.0,
-       7, 1445,  -1,  -2, False),
+       7, 1445,   0,   0, False),
     ( 75, "2024-01-12", "Tower Hilal Meras - Manado",
       1.48033, 124.83367, 31.0,
-       7, 1445,  -1,   4, False),
+       7, 1445,   0,   0, False),
     ( 76, "2024-01-12", "Pantai Purus - Kota Padang",
       -0.9295313925782047, 100.3500354721508, 5.0,
        7, 1445,   0,   0, False),
@@ -438,10 +440,10 @@ OBSERVATIONS = [
     # Syawal 1445H (2024-04-09)
     ( 77, "2024-04-09", "Tower Hilal Meras - Manado",
       1.48033, 124.83367, 31.0,
-      10, 1445,  -1,   4, True),
+      10, 1445,   0,   0, True),
     ( 78, "2024-04-09", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-      10, 1445,  -1,   4, False),
+      10, 1445,   0,   0, False),
 
     # Dzulqa'dah 1445H (2024-05-09)
     ( 79, "2024-05-09", "Labuan Bajo - Nusa Tenggara Timur",
@@ -449,7 +451,7 @@ OBSERVATIONS = [
       11, 1445,   0,   0, True),
     ( 80, "2024-05-09", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-      11, 1445,  -1,   4, False),
+      11, 1445,   0,   0, False),
 
     # Dzulhijjah 1445H (2024-06-07)
     ( 81, "2024-06-07", "Pantai Binasi - Tapanuli Tengah",
@@ -460,16 +462,16 @@ OBSERVATIONS = [
       12, 1445,   0,   0, True),
     ( 83, "2024-06-07", "Tower Hilal Meras - Manado",
       1.48033, 124.83367, 31.0,
-      12, 1445,  -1,   4, True),
+      12, 1445,   0,   0, True),
     ( 84, "2024-06-07", "Pantai Lampu Satu - Merauke",
       -8.511434241469269, 140.3785140085394, 4.0,
       12, 1445,   0,   0, True),
     ( 85, "2024-06-07", "Tower Hilal Ave Taduma - Ternate",
       0.7961631476438263, 127.2940983176842, 33.0,
-      12, 1445,  -1,   2, True),
+      12, 1445,   0,   0, True),
     ( 86, "2024-06-07", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-      12, 1445,  -1,   4, True),
+      12, 1445,   0,   0, True),
     ( 87, "2024-06-07", "Tanjung Lesung Beach Hotel - Pandeglang",
       -6.479559259357492, 105.6535861308633, 1.0,
       12, 1445,   0,   0, True),
@@ -493,10 +495,10 @@ OBSERVATIONS = [
       12, 1445,   0,   0, False),
     ( 94, "2024-06-07", "POB Cikelet - Garut",
       -7.593820433086044, 107.6236772096795, 14.0,
-      12, 1445,  -1,   2, False),
+      12, 1445,   0,   0, False),
     ( 95, "2024-06-07", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-      12, 1445,  -1,   2, False),
+      12, 1445,   0,   0, False),
     ( 96, "2024-06-07", "Kantor Stageof - Aceh Selatan",
       3.134044281892134, 97.31173637163916, 11.0,
       12, 1445,   0,   0, False),
@@ -507,16 +509,16 @@ OBSERVATIONS = [
        2, 1446,   0,   0, True),
     ( 98, "2024-08-05", "Tower Hilal Ave Taduma - Ternate",
       0.7961631476438263, 127.2940983176842, 33.0,
-       2, 1446,  -1,   2, True),
+       2, 1446,   0,   0, True),
     ( 99, "2024-08-05", "Kampus 4 UAD Lantai 10 - Bantul",
       -7.833012779061722, 110.3832251777645, 114.0,
        2, 1446,   0,   0, True),
     (100, "2024-08-05", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       2, 1446,  -1,   2, True),
+       2, 1446,   0,   0, True),
     (101, "2024-08-05", "Tower Hilal Meras - Manado",
       1.48033, 124.83367, 31.0,
-       2, 1446,  -1,   4, True),
+       2, 1446,   0,   0, True),
     (102, "2024-08-05", "The Hele'yo Sentani - Jayapura",
       -2.598228404975657, 140.5239804972283, 76.0,
        2, 1446,   0,   0, True),
@@ -537,7 +539,7 @@ OBSERVATIONS = [
        2, 1446,   0,   0, True),
     (108, "2024-08-05", "Kantor BMKG NTT - Kupang",
       -10.152721211412, 123.6084268386404, 46.0,
-       2, 1446,  -1,  -2, True),
+       2, 1446,   0,   0, True),
     (109, "2024-08-05", "Pantai Lampu Satu - Merauke",
       -8.511434241469269, 140.3785140085394, 4.0,
        2, 1446,   0,   0, False),
@@ -558,7 +560,7 @@ OBSERVATIONS = [
        2, 1446,   0,   0, False),
     (115, "2024-08-05", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-       2, 1446,  -1,   4, False),
+       2, 1446,   0,   0, False),
     (116, "2024-08-05", "Mall GTC - Makassar",
       -5.169821858523188, 119.3905650987459, 14.0,
        2, 1446,   0,   0, False),
@@ -570,7 +572,7 @@ OBSERVATIONS = [
        2, 1446,   0,   0, False),
     (119, "2024-08-05", "Tower Hilal Marana - Donggala",
       -0.578624, 119.7907213933992, 13.0,
-       2, 1446,  -4,  10, False),
+       2, 1446,   0,   0, False),
     (120, "2024-08-05", "Dermaga Kokar - Alor",
       -8.160633661422654, 124.4469298628282, 6.0,
        2, 1446,   0,   0, False),
@@ -578,10 +580,10 @@ OBSERVATIONS = [
     # Jumadil Akhir 1446H (2024-12-02)
     (121, "2024-12-02", "Tower Hilal Meras - Manado",
       1.48033, 124.83367, 31.0,
-       6, 1446,  -1,   4, True),
+       6, 1446,   0,   0, True),
     (122, "2024-12-02", "Tower Hilal Sulamu - Kupang",
       -10.04515269471165, 123.6061277641333, 15.0,
-       6, 1446,  -1,  -2, True),
+       6, 1446,   0,   0, True),
     (123, "2024-12-02", "Dermaga Bahari - Kolaka",
       -4.35282009438306, 121.5162368226745, 1.0,
        6, 1446,   0,   0, True),
@@ -593,19 +595,19 @@ OBSERVATIONS = [
        6, 1446,   0,   0, True),
     (126, "2024-12-02", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       6, 1446,  -1,   2, False),
+       6, 1446,   0,   0, False),
     (127, "2024-12-02", "Tower Hilal Ave Taduma - Ternate",
       0.7961631476438263, 127.2940983176842, 33.0,
-       6, 1446,  -1,   2, False),
+       6, 1446,   0,   0, False),
     (128, "2024-12-02", "POB Cikelet - Garut",
       -7.593820433086044, 107.6236772096795, 14.0,
-       6, 1446,  -1,   2, False),
+       6, 1446,   0,   0, False),
     (129, "2024-12-02", "Bukit Persaudaraan Mauliru - Sumba Timur",
       -9.67563477316942, 120.295333443605, 68.0,
        6, 1446,   0,   0, False),
     (130, "2024-12-02", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-       6, 1446,  -1,   4, False),
+       6, 1446,   0,   0, False),
 
     # Sya'ban 1446H (2025-01-30)
     (131, "2025-01-30", "Kantor Stageof - Sorong",
@@ -613,7 +615,7 @@ OBSERVATIONS = [
        8, 1446,   0,   0, True),
     (132, "2025-01-30", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-       8, 1446,  -1,   4, False),
+       8, 1446,   0,   0, False),
 
     # Muharram 1447H (2025-06-26)
     (133, "2025-06-26", "Rooftop Stamet RHF - Tanjungpinang",
@@ -630,10 +632,10 @@ OBSERVATIONS = [
        1, 1447,   0,   0, True),
     (137, "2025-06-26", "Tower Hilal Meras - Manado",
       1.48033, 124.83367, 31.0,
-       1, 1447,  -1,   4, True),
+       1, 1447,   0,   0, True),
     (138, "2025-06-26", "POB Cikelet - Garut",
       -7.593820433086044, 107.6236772096795, 14.0,
-       1, 1447,  -1,   2, True),
+       1, 1447,   0,   0, True),
     (139, "2025-06-26", "Kantor Stageof - Aceh Selatan",
       3.134044281892134, 97.31173637163916, 11.0,
        1, 1447,   0,   0, True),
@@ -642,22 +644,22 @@ OBSERVATIONS = [
        1, 1447,   0,   0, True),
     (141, "2025-06-26", "Kantor BMKG NTT - Kupang",
       -10.152721211412, 123.6084268386404, 46.0,
-       1, 1447,  -1,  -2, True),
+       1, 1447,   0,   0, True),
     (142, "2025-06-26", "Kantor Stageof - Sorong",
       -0.8623221459653803, 131.2590990937428, 50.0,
        1, 1447,   0,   0, True),
     (143, "2025-06-26", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-       1, 1447,  -1,   4, False),
+       1, 1447,   0,   0, False),
     (144, "2025-06-26", "Halaman Stageof - Lampung Utara",
       -4.836056629367655, 104.8700882354863, 33.0,
-       1, 1447,  -1,   6, False),
+       1, 1447,   0,   0, False),
     (145, "2025-06-26", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       1, 1447,  -1,   2, False),
+       1, 1447,   0,   0, False),
     (146, "2025-06-26", "Tower Hilal Marana - Donggala",
       -0.578624, 119.7907213933992, 13.0,
-       1, 1447,  -4,  10, False),
+       1, 1447,   0,   0, False),
     (147, "2025-06-26", "Pendopo Kantor Desa Jenggawur - Banjarnegara",
       -7.388465686197972, 109.6759518259036, 279.0,
        1, 1447,   0,   0, False),
@@ -680,25 +682,25 @@ OBSERVATIONS = [
     # Rabiul Awal 1447H (2025-08-24)
     (153, "2025-08-24", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       3, 1447,  -1,   2, True),
+       3, 1447,   0,   0, True),
     (154, "2025-08-24", "Kantor BMKG NTT - Kupang",
       -10.152721211412, 123.6084268386404, 46.0,
-       3, 1447,  -1,  -2, True),
+       3, 1447,   0,   0, True),
     (155, "2025-08-24", "Pantai Galesong - Takalar",
       -5.241962225688506, 119.3804270461404, 4.0,
        3, 1447,   0,   0, True),
     (156, "2025-08-24", "Tower Hilal Meras - Manado",
       1.48033, 124.83367, 31.0,
-       3, 1447,  -1,   4, True),
+       3, 1447,   0,   0, True),
     (157, "2025-08-24", "Markaz Rukyatul Hilal Tanjung Kodok - Lamongan",
       -6.863960364296696, 112.3580709472701, 8.0,
        3, 1447,   0,   0, True),
     (158, "2025-08-24", "Tower Hilal Marana - Donggala",
       -0.578624, 119.7907213933992, 13.0,
-       3, 1447,  -4,  10, True),
+       3, 1447,   0,   0, True),
     (159, "2025-08-24", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-       3, 1447,  -1,   4, True),
+       3, 1447,   0,   0, True),
     (160, "2025-08-24", "Pantai Tanah Lot - Tabanan",
       -8.621148275279072, 115.0876640708968, 10.0,
        3, 1447,   0,   0, True),
@@ -719,7 +721,7 @@ OBSERVATIONS = [
        3, 1447,   0,   0, False),
     (166, "2025-08-24", "Halaman Stageof - Lampung Utara",
       -4.836056629367655, 104.8700882354863, 33.0,
-       3, 1447,  -1,   6, False),
+       3, 1447,   0,   0, False),
     (167, "2025-08-24", "Pantai Pondok Bali - Subang",
       -6.207296470088122, 107.7760496555537, 1.0,
        3, 1447,   0,   0, False),
@@ -754,7 +756,7 @@ OBSERVATIONS = [
     # Jumadil Akhir 1447H (2025-11-21)
     (177, "2025-11-21", "Tower Hilal Marana - Donggala",
       -0.578624, 119.7907213933992, 13.0,
-       6, 1447,  -4,  10, True),
+       6, 1447,   0,   0, True),
     (178, "2025-11-21", "Pantai Lampu Satu - Merauke",
       -8.511434241469269, 140.3785140085394, 4.0,
        6, 1447,   0,   0, True),
@@ -763,19 +765,19 @@ OBSERVATIONS = [
        6, 1447,   0,   0, True),
     (180, "2025-11-21", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       6, 1447,  -1,   2, True),
+       6, 1447,   0,   0, True),
     (181, "2025-11-21", "Kantor BMKG NTT - Kupang",
       -10.152721211412, 123.6084268386404, 46.0,
-       6, 1447,  -1,  -2, True),
+       6, 1447,   0,   0, True),
     (182, "2025-11-21", "Pantai Luk Indah - Lombok Utara",
       -8.285164415868195, 116.2202994436726, 5.0,
        6, 1447,   0,   0, True),
     (183, "2025-11-21", "Tower Hilal Meras - Manado",
       1.48033, 124.83367, 31.0,
-       6, 1447,  -1,   4, False),
+       6, 1447,   0,   0, False),
     (184, "2025-11-21", "Tower Hilal Ave Taduma - Ternate",
       0.7961631476438263, 127.2940983176842, 33.0,
-       6, 1447,  -1,   2, False),
+       6, 1447,   0,   0, False),
     (185, "2025-11-21", "Bukit Persaudaraan Mauliru - Sumba Timur",
       -9.67563477316942, 120.295333443605, 68.0,
        6, 1447,   0,   0, False),
@@ -792,16 +794,16 @@ OBSERVATIONS = [
     # Rajab 1447H (2025-12-21)
     (189, "2025-12-21", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-       7, 1447,  -1,   4, True),
+       7, 1447,   0,   0, True),
     (190, "2025-12-21", "Tower Hilal Meras - Manado",
       1.48033, 124.83367, 31.0,
-       7, 1447,  -1,   4, True),
+       7, 1447,   0,   0, True),
     (191, "2025-12-21", "Tower Hilal Ave Taduma - Ternate",
       0.7961631476438263, 127.2940983176842, 33.0,
-       7, 1447,  -1,   2, True),
+       7, 1447,   0,   0, True),
     (192, "2025-12-21", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       7, 1447,  -1,   2, True),
+       7, 1447,   0,   0, True),
     (193, "2025-12-21", "Tugu Christina - Ambon",
       -3.687469703972144, 128.1923836941696, 85.0,
        7, 1447,   0,   0, True),
@@ -842,10 +844,10 @@ OBSERVATIONS = [
        9, 1447,   0,   0, True),
     (205, "2026-02-18", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-       9, 1447,  -1,   4, False),
+       9, 1447,   0,   0, False),
     (206, "2026-02-18", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       9, 1447,  -1,   2, False),
+       9, 1447,   0,   0, False),
 
     # Dzulqa'dah 1447H (2026-04-18)
     (207, "2026-04-18", "Masjid Al-Hakim - Kota Padang",
@@ -856,7 +858,7 @@ OBSERVATIONS = [
       11, 1447,   0,   0, True),
     (209, "2026-04-18", "Tower Hilal Meras - Manado",
       1.48033, 124.83367, 31.0,
-      11, 1447,  -1,   4, True),
+      11, 1447,   0,   0, True),
     (210, "2026-04-18", "Pantai Tanah Lot - Tabanan",
       -8.621148275279072, 115.0876640708968, 10.0,
       11, 1447,   0,   0, True),
@@ -865,10 +867,10 @@ OBSERVATIONS = [
       11, 1447,   0,   0, True),
     (212, "2026-04-18", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-      11, 1447,  -1,   2, True),
+      11, 1447,   0,   0, True),
     (213, "2026-04-18", "Tower Hilal Ave Taduma - Ternate",
       0.7961631476438263, 127.2940983176842, 33.0,
-      11, 1447,  -1,   2, True),
+      11, 1447,   0,   0, True),
     (214, "2026-04-18", "Islamic Center - Balikpapan",
       -1.23917005988127, 116.8824322915359, 50.0,
       11, 1447,   0,   0, True),
@@ -898,7 +900,7 @@ OBSERVATIONS = [
       11, 1447,   0,   0, False),
     (223, "2026-04-18", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-      11, 1447,  -1,   4, False),
+      11, 1447,   0,   0, False),
     (224, "2026-04-18", "Pendopo Kantor Desa Jenggawur - Banjarnegara",
       -7.388465686197972, 109.6759518259036, 279.0,
       11, 1447,   0,   0, False),
@@ -907,7 +909,7 @@ OBSERVATIONS = [
       11, 1447,   0,   0, False),
     (226, "2026-04-18", "Tower Hilal Marana - Donggala",
       -0.578624, 119.7907213933992, 13.0,
-      11, 1447,  -4,  10, False),
+      11, 1447,   0,   0, False),
     (227, "2026-04-18", "Rooftop Stageof - Bandung",
       -6.883392337096449, 107.5971865865387, 802.0,
       11, 1447,   0,   0, False),
@@ -918,16 +920,16 @@ OBSERVATIONS = [
       12, 1447,   0,   0, True),
     (229, "2026-05-17", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-      12, 1447,  -1,   4, False),
+      12, 1447,   0,   0, False),
     (230, "2026-05-17", "Tower Hilal Meras - Manado",
       1.48033, 124.83367, 31.0,
-      12, 1447,  -1,   4, False),
+      12, 1447,   0,   0, False),
     (231, "2026-05-17", "Pantai Tanjung Setumu - Tanjung Pinang",
       0.8760089599074261, 104.4173088608222, 2.0,
       12, 1447,   0,   0, False),
     (232, "2026-05-17", "Tower Hilal Marana - Donggala",
       -0.578624, 119.7907213933992, 13.0,
-      12, 1447,  -4,  10, False),
+      12, 1447,   0,   0, False),
 
     # Safar 1448H (2026-07-15)
     (233, "2026-07-15", "Pondok Pesantren Hidayatullah - Balikpapan",
@@ -935,13 +937,13 @@ OBSERVATIONS = [
        2, 1448,   0,   0, True),
     (234, "2026-07-15", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       2, 1448,  -1,   2, True),
+       2, 1448,   0,   0, True),
     (235, "2026-07-15", "POB Lhoknga - Aceh Besar",
       5.466784768299926, 95.2422058726947, 13.0,
-       2, 1448,  -1,   4, True),
+       2, 1448,   0,   0, True),
     (236, "2026-07-15", "Tower Hilal Meras - Manado",
       1.48033, 124.83367, 31.0,
-       2, 1448,  -1,   4, True),
+       2, 1448,   0,   0, True),
     (237, "2026-07-15", "Sentani Purnama Resto - Jayapura",
       -2.604920808424523, 140.6294757431127, 74.0,
        2, 1448,   0,   0, True),
@@ -965,7 +967,7 @@ OBSERVATIONS = [
        2, 1448,   0,   0, True),
     (244, "2026-07-15", "Tower Hilal Sulamu - Kupang",
       -10.04515269471165, 123.6061277641333, 15.0,
-       2, 1448,  -1,  -2, False),
+       2, 1448,   0,   0, False),
     (245, "2026-07-15", "POB Syekh Belabelu - Bantul",
       -8.016269183330273, 110.3234649137316, 46.0,
        2, 1448,   0,   0, False),
@@ -1009,7 +1011,7 @@ OBSERVATIONS = [
        3, 1448,   0,   0, False),
     (258, "2026-08-13", "Kantor BMKG NTT - Kupang",
       -10.152721211412, 123.6084268386404, 46.0,
-       3, 1448,  -1,  -2, False),
+       3, 1448,   0,   0, False),
     (259, "2026-08-13", "Rooftop Stamet RHF - Tanjungpinang",
       0.9235109454344037, 104.5290293385911, 17.0,
        3, 1448,   0,   0, False),
@@ -1018,10 +1020,10 @@ OBSERVATIONS = [
        3, 1448,   0,   0, False),
     (261, "2026-08-13", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       3, 1448,  -1,   2, False),
+       3, 1448,   0,   0, False),
     (262, "2026-08-13", "Tower Hilal Meras - Manado",
       1.48033, 124.83367, 31.0,
-       3, 1448,  -1,   4, False),
+       3, 1448,   0,   0, False),
     (263, "2026-08-13", "Pantai Sibone - Alor",
       -8.155439264411921, 124.7279493728136, 5.0,
        3, 1448,   0,   0, False),
@@ -1038,7 +1040,7 @@ OBSERVATIONS = [
        4, 1448,   0,   0, True),
     (267, "2026-09-12", "Kantor BMKG NTT - Kupang",
       -10.152721211412, 123.6084268386404, 46.0,
-       4, 1448,  -1,  -2, True),
+       4, 1448,   0,   0, True),
     (268, "2026-09-12", "Bukit Persaudaraan Mauliru - Sumba Timur",
       -9.67563477316942, 120.295333443605, 68.0,
        4, 1448,   0,   0, True),
@@ -1065,10 +1067,10 @@ OBSERVATIONS = [
        4, 1448,   0,   0, False),
     (276, "2026-09-12", "Tower Hilal Marana - Donggala",
       -0.578624, 119.7907213933992, 13.0,
-       4, 1448,  -4,  10, False),
+       4, 1448,   0,   0, False),
     (277, "2026-09-12", "pantai Loang Baloq - Mataram",
       -8.603710273563724, 116.0743526343624, 5.0,
-       4, 1448,  -1,   2, False),
+       4, 1448,   0,   0, False),
     (278, "2026-09-12", "BMKG Pusat - DKI Jakarta",
       -6.155706213314788, 106.8416455263788, 46.0,
        4, 1448,   0,   0, False),
@@ -1202,6 +1204,7 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
             'transmission_v': hasil['transmission_v'],
             'rh': hasil.get('rh', 0),
             'temperature': hasil.get('temperature', 0),
+            'pressure': hasil.get('pressure'),
             'delta_m_ne_sunset': hasil.get('delta_m_ne', -99.0),
             'delta_m_tel_sunset': hasil.get('delta_m_tel', -99.0),
             'telescope_gain_sunset': hasil.get('telescope_gain', 0),
@@ -1235,6 +1238,7 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
                 'opt_ne_transmission_v': opt_ne.get('transmission_v'),
                 'opt_ne_rh': opt_ne.get('rh', 0),
                 'opt_ne_temperature': opt_ne.get('temperature', 0),
+                'opt_ne_pressure': opt_ne.get('pressure'),
                 # Data astronomis optimal Teleskop
                 'opt_tel_elongation': opt_tel.get('elongation', 0),
                 'opt_tel_phase_angle': opt_tel.get('phase_angle'),
@@ -1247,6 +1251,7 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
                 'opt_tel_transmission_v': opt_tel.get('transmission_v'),
                 'opt_tel_rh': opt_tel.get('rh', 0),
                 'opt_tel_temperature': opt_tel.get('temperature', 0),
+                'opt_tel_pressure': opt_tel.get('pressure'),
             })
         else:
             result.update({
@@ -1265,12 +1270,14 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
                 'opt_ne_extinction_mag_v': None, 'opt_ne_transmission_v': None,
                 'opt_ne_moon_semidiameter': None, 'opt_ne_moon_distance_km': None,
                 'opt_ne_rh': 0, 'opt_ne_temperature': 0,
+                'opt_ne_pressure': None,
                 'opt_tel_elongation': 0, 'opt_tel_sky_brightness_nl': 0,
                 'opt_tel_luminansi_hilal_nl': 0, 'opt_tel_k_v': 0,
                 'opt_tel_extinction_mag_v': None, 'opt_tel_transmission_v': None,
                 'opt_tel_phase_angle': None,
                 'opt_tel_moon_semidiameter': None, 'opt_tel_moon_distance_km': None,
                 'opt_tel_rh': 0, 'opt_tel_temperature': 0,
+                'opt_tel_pressure': None,
             })
 
         # Ringkasan cepat
@@ -1315,12 +1322,16 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
         }
 
 
-def run_batch(bias_mode: str = '1', manual_bias_t: float = 0.0, manual_bias_rh: float = 0.0) -> List[dict]:
+def run_batch(bias_mode: str = '2', manual_bias_t: float = 0.0, manual_bias_rh: float = 0.0) -> List[dict]:
     """Jalankan model untuk semua observasi."""
     print("\n" + "█" * 70)
     print("  BATCH VALIDATION: Model Crumey (2014) vs Observasi Hilal")
-    print(f"  {N_OBS} data observasi × 4 event rukyat (2022–2024)")
+    n_tanggal = len({entry[1] for entry in OBSERVATIONS})
+    print(f"  {N_OBS} data observasi pada {n_tanggal} tanggal pengamatan")
     print(f"  Mode: {CALC_MODE}  |  Atmosfer: {SUMBER_ATMOSFER}")
+    if SUMBER_ATMOSFER == 'ecmwf_ifs':
+        print(f"  Produk: {IFS_PRODUCT_NAME}")
+        print(f"  API: {ARCHIVE_URL}")
     print(f"  F_naked_ref={F_NAKED_REF}  |  F_tel_ref={FIELD_FACTOR_REF}")
     if bias_mode == '2':
         print("  Koreksi Bias: Tanpa koreksi (bias = 0)")
@@ -1413,7 +1424,7 @@ def print_results_table(results: List[dict]):
 # EXCEL OUTPUT
 # ═══════════════════════════════════════════════════════════════════
 
-def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Data Bawaan Lokasi"):
+def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Tanpa koreksi (bias = 0)"):
     """Simpan semua hasil ke file Excel dengan format rapi 2-baris header."""
     from datetime import time as dt_time
     from openpyxl import Workbook
@@ -1533,6 +1544,21 @@ def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Data
         ('opt_tel_moon_semidiameter', 'Semidiameter Tel Optimal (deg)'),
     )
     for ci, (_, label) in enumerate(geometry_columns, 55):
+        c = ws.cell(row=2, column=ci, value=label)
+        c.font = hdr_font; c.fill = sunset_fill
+        c.alignment = center; c.border = thin_border
+        ws.column_dimensions[get_column_letter(ci)].width = 24
+
+    ws.merge_cells('BF1:BH1')
+    c = ws.cell(row=1, column=58, value='TEKANAN UDARA PERMUKAAN (hPa)')
+    c.font = hdr_font; c.fill = sunset_fill
+    c.alignment = center_no_v; c.border = thin_border
+    pressure_columns = (
+        ('pressure', 'P_Sunset (hPa)'),
+        ('opt_ne_pressure', 'P_NE_Optimal (hPa)'),
+        ('opt_tel_pressure', 'P_Tel_Optimal (hPa)'),
+    )
+    for ci, (_, label) in enumerate(pressure_columns, 58):
         c = ws.cell(row=2, column=ci, value=label)
         c.font = hdr_font; c.fill = sunset_fill
         c.alignment = center; c.border = thin_border
@@ -1709,6 +1735,8 @@ def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Data
             row_data[ci] = value if value is None or math.isfinite(value) else str(value)
         for ci, (key, _) in enumerate(geometry_columns, 55):
             row_data[ci] = r.get(key) if r.get('success') else None
+        for ci, (key, _) in enumerate(pressure_columns, 58):
+            row_data[ci] = r.get(key) if r.get('success') else None
 
         if not r.get('success'):
             for ci in range(9, 47):
@@ -1726,6 +1754,8 @@ def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Data
             # Format waktu
             if ci in (9, 24, 34) and isinstance(val, dt_time):
                 c.number_format = 'h:mm:ss'
+            if ci in (58, 59, 60):
+                c.number_format = '0.00'
 
             # Warna Δm data
             if ci in SUNSET_DM_COLS:
@@ -1772,6 +1802,9 @@ def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Data
         ("KONFIGURASI", ""),
         ("Mode Perhitungan", CALC_MODE),
         ("Sumber Atmosfer", SUMBER_ATMOSFER),
+        ("Produk IFS", IFS_PRODUCT_NAME if SUMBER_ATMOSFER == 'ecmwf_ifs' else 'N/A'),
+        ("Model API IFS", IFS_MODEL if SUMBER_ATMOSFER == 'ecmwf_ifs' else 'N/A'),
+        ("Endpoint IFS", ARCHIVE_URL if SUMBER_ATMOSFER == 'ecmwf_ifs' else 'N/A'),
         ("Ekstingsi LOS / A_V", "extinction_mag_v = DM[2] [mag]"),
         ("Transmisi Atmosfer / T_V", "transmission_v = 10^(-0.4 A_V)"),
         ("Definisi Luminansi Hilal", "Direct/excess luminance setelah atmosfer [nL]"),
@@ -1851,6 +1884,8 @@ def save_to_csv(results: List[dict], filepath: str):
     transmission_v_NE_Optimal untuk best time naked eye.
     Geometri: moon_semidiameter_deg_* dan moon_distance_km_* untuk ketiga
     waktu pengamatan; Phase_Angle_BT untuk analisis source pada best time.
+    Tekanan permukaan: P_Sunset, P_NE_Optimal, P_Tel_Optimal dalam hPa;
+    kolom kosong jika tekanan/waktu optimal tidak tersedia atau observasi gagal.
     """
     headers = [
         'No', 'Tanggal', 'Lokasi', 'Lat', 'Lon', 'Elv', 'Bulan_Hijri',
@@ -1868,6 +1903,7 @@ def save_to_csv(results: List[dict], filepath: str):
         'moon_semidiameter_deg_NE_Optimal', 'moon_distance_km_NE_Optimal',
         'Phase_Angle_BT',
         'Status', 'Error',
+        'P_Sunset', 'P_NE_Optimal', 'P_Tel_Optimal',
     ]
 
     out_dir = os.path.dirname(filepath)
@@ -1953,6 +1989,9 @@ def save_to_csv(results: List[dict], filepath: str):
                 _full(r.get('opt_tel_phase_angle')),
                 'valid' if r.get('success') else 'invalid',
                 r.get('error', ''),
+                _full(r.get('pressure')),
+                _full(r.get('opt_ne_pressure')),
+                _full(r.get('opt_tel_pressure')),
             ]
 
             writer.writerow(row)
@@ -1972,7 +2011,7 @@ def _input_koreksi_bias_batch() -> tuple:
     print("  2. Tanpa koreksi (bias_t = 0, bias_rh = 0)")
     print("  3. Input manual nilai bias seragam untuk semua lokasi")
     try:
-        pilihan = input("\n  Pilih opsi (1/2/3) [enter=1]: ").strip() or "1"
+        pilihan = input("\n  Pilih opsi (1/2/3) [enter=2]: ").strip() or "2"
         if pilihan == "2":
             print("  ✓ Menggunakan data tanpa koreksi")
             return "2", 0.0, 0.0, "Tanpa koreksi (bias = 0)"
@@ -1983,14 +2022,17 @@ def _input_koreksi_bias_batch() -> tuple:
             bias_rh = float(rh_str) if rh_str else 0.0
             print(f"  ✓ Koreksi bias seragam: T={bias_t:+.1f}°C, RH={bias_rh:+.1f}%")
             return "3", bias_t, bias_rh, f"Manual Seragam (T={bias_t:+.1f}°C, RH={bias_rh:+.1f}%)"
-        else:
+        elif pilihan == "1":
             print("  ✓ Menggunakan data bawaan lokasi")
             return "1", 0.0, 0.0, "Data Bawaan Lokasi"
+        else:
+            print("  [!] Pilihan tidak valid, menggunakan data tanpa koreksi.")
+            return "2", 0.0, 0.0, "Tanpa koreksi (bias = 0)"
     except EOFError:
-        return "1", 0.0, 0.0, "Data Bawaan Lokasi"
+        return "2", 0.0, 0.0, "Tanpa koreksi (bias = 0)"
     except ValueError:
-        print("  [!] Input tidak valid, menggunakan bawaan lokasi.")
-        return "1", 0.0, 0.0, "Data Bawaan Lokasi"
+        print("  [!] Input tidak valid, menggunakan data tanpa koreksi.")
+        return "2", 0.0, 0.0, "Tanpa koreksi (bias = 0)"
 
 def main():
     """Entry point utama."""
