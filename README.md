@@ -15,7 +15,7 @@ Program ini menghitung visibilitas hilal dengan mengintegrasikan:
 - **Model Schaefer** untuk background langit, koefisien ekstingsi, kehilangan cahaya sepanjang garis pandang, dan transmisi atmosfer
 - **Model Kastner** untuk luminansi intrinsik hilal, lalu penerapan transmisi Schaefer
 - **Model Crumey** untuk ambang kontras dan margin visibilitas mata telanjang serta teleskop
-- **Data Reanalisis Atmosfer** dari ERA5, MERRA-2, BMKG, atau input manual
+- **Data Atmosfer** dari arsip ECMWF IFS, MERRA-2, atau input manual
 
 ---
 
@@ -28,7 +28,7 @@ Program ini menghitung visibilitas hilal dengan mengintegrasikan:
 | **Sky Brightness**          | Diperoleh dari website (algoritma tidak diketahui) | Dihitung menggunakan **model Schaefer** dengan algoritma transparan |
 | **Koefisien Ekstingsi (k)** | Menggunakan nilai asumsi (misal k=0.5)             | Dihitung berdasarkan **parameter atmosfer aktual** (RH, T, P)       |
 | **Luminansi Hilal**         | Model Kastner dengan k asumsi                      | Luminansi intrinsik Kastner dikalikan **transmisi LOS Schaefer**    |
-| **Data Atmosfer**           | Tidak ada / asumsi standar                         | Data **reanalisis ERA5 dan MERRA-2** dengan interpolasi temporal    |
+| **Data Atmosfer**           | Tidak ada / asumsi standar                         | Data **arsip ECMWF IFS dan reanalisis MERRA-2** dengan interpolasi temporal    |
 | **Visibilitas Teleskop**    | Koreksi sederhana (Schaefer 1990)                  | Model terintegrasi **Schaefer-Crumey** dengan contrast threshold    |
 
 ### Kontribusi Utama
@@ -136,7 +136,6 @@ Core/
 ├── telescope_limit.py               # Ambang batas visibilitas hilal teleskop (Schaefer 1990)
 ├── atmosfer_ecmwf_ifs.py            # API Open-Meteo ECMWF IFS
 ├── atmosfer_merra2.py               # API NASA POWER MERRA-2 (data reanalisis 1981-sekarang)
-├── atmosfer_bmkg.py                 # API BMKG (prakiraan cuaca 3 hari ke depan)
 ├── data_hisab.py                    # Perhitungan astronomi (ijtima, posisi matahari/bulan)
 ├── daftar_lokasi.py                 # Database lokasi pengamatan
 ├── de440s.bsp                       # Ephemeris JPL (~32MB)
@@ -152,7 +151,7 @@ flowchart TB
     subgraph INPUT["INPUT"]
         A1[Lokasi: lat, lon, elevasi]
         A2[Bulan & Tahun Hijri]
-        A3[Sumber Atmosfer: ERA5/MERRA-2/BMKG/Manual]
+        A3[Sumber Atmosfer: ECMWF IFS/MERRA-2/Manual]
     end
 
     subgraph HISAB["PERHITUNGAN ASTRONOMI"]
@@ -347,14 +346,35 @@ $$
 
 ## 11. Sumber Data Atmosfer
 
-Program mendukung 4 sumber data atmosfer:
+Program mendukung 3 sumber data atmosfer:
 
 | Sumber            | Endpoint                       | Variabel             | Jangkauan           |
 | ----------------- | ------------------------------ | -------------------- | ------------------- |
-| **ERA5**    | `archive-api.open-meteo.com` | RH2M, T2M, Pressure | 1940 - sekarang     |
+| **ECMWF IFS** | `archive-api.open-meteo.com` (`models=ecmwf_ifs`) | RH2M, T2M, Pressure, Dew Point | Arsip sejak 2017 |
 | **MERRA-2** | `power.larc.nasa.gov`        | RH2M, T2M, PS       | 1981 - sekarang     |
-| **BMKG**    | API BMKG Prakiraan             | RH, T                | 3 hari ke depan     |
 | **Manual**  | Input pengguna                 | RH, T, P             | Bebas               |
+
+Jalur IFS mengunci `models="ecmwf_ifs"`, mengirim elevasi lokasi dan
+`cell_selection="land"`, serta menyimpan sampel dan waktu dalam UTC. RH
+diturunkan Open-Meteo dari suhu dan dew point; tekanan permukaan diturunkan
+dari tekanan MSL, suhu, dan elevasi. Elevasi respons adalah elevasi efektif
+untuk downscaling, bukan jaminan elevasi asli grid ECMWF. Lihat
+[Historical Weather API](https://open-meteo.com/en/docs/historical-weather-api)
+dan [variabel turunan ECMWF](https://open-meteo.com/en/docs/ecmwf-api).
+
+Mode optimal menggunakan pasangan sampel hourly asli untuk seluruh scan,
+termasuk refinement ±2 menit. Koreksi bias diterapkan setelah interpolasi.
+Data kosong, tidak finite, RH di luar 0–100%, atau tekanan tidak positif
+menyebabkan observasi gagal; program tidak menggantinya dengan cuaca default.
+Mode manual tetap menerima nilai yang dipilih pengguna secara eksplisit.
+
+Setiap ekspor CSV/XLSX disertai `<nama-file>.atmosphere.json`, yang menyimpan
+status observasi, error bila gagal, sumber/model, koordinat yang diminta dan
+dikembalikan, elevasi efektif, satuan, waktu, bias, serta sampel hourly mentah
+(termasuk dew point untuk IFS). Sampel sumber lain ditandai sebagai hasil
+adapter atau input manual.
+Resolusi IFS bukan bukti akurasi lokal; validasi terhadap observasi BMKG
+tetap diperlukan sebelum menetapkan dataset akhir penelitian.
 
 ---
 
@@ -370,7 +390,7 @@ Program akan memandu pengguna melalui langkah-langkah:
 1. Pilih lokasi pengamatan (dari database atau input manual)
 2. Input bulan dan tahun Hijriah
 3. Pilih mode perhitungan (sunset / optimal)
-4. Pilih sumber data atmosfer (ERA5 / MERRA-2 / BMKG / Manual)
+4. Pilih sumber data atmosfer (ECMWF IFS / MERRA-2 / Manual)
 5. Konfigurasi koreksi bias (opsional)
 6. Konfigurasi parameter teleskop (opsional)
 7. Simpan hasil ke Excel (opsional)
@@ -389,7 +409,7 @@ calc = HilalVisibilityCalculator(
     timezone_str="Asia/Jakarta",
     bulan_hijri=9,
     tahun_hijri=1444,
-    sumber_atmosfer='era5'      # 'era5', 'merra2', 'bmkg', atau 'manual'
+    sumber_atmosfer='ecmwf_ifs' # 'ecmwf_ifs', 'merra2', atau 'manual'
 )
 
 hasil = calc.jalankan_perhitungan_lengkap(
@@ -527,7 +547,7 @@ API area Crumey sekarang menerima `elongation_deg`, menggantikan `phase_angle_de
 
 Validasi referensi bawaan terpisah dari tes antarmuka. Empat perbandingan Eq. 63 (aproksimasi radius Ricco) masih gagal; formulasi threshold tersebut berada di luar perubahan antarmuka ini.
 
-Pada checkout ini, dispatcher atmosfer mendukung `ecmwf_ifs`, `merra2`, `bmkg`, dan `manual`. Konfigurasi default lama `SUMBER_ATMOSFER = "era5"` di skrip batch perlu diganti ke sumber yang tersedia sebelum menjalankan batch; modul ERA5 tidak ada dalam checkout. Pengujian integrasi memakai atmosfer manual dan ephemeris DE440 lokal.
+Pada checkout ini, dispatcher atmosfer mendukung `ecmwf_ifs`, `merra2`, dan `manual`. Skrip batch memakai `SUMBER_ATMOSFER = "ecmwf_ifs"`; modul ERA5 tidak ada dalam checkout. Pengujian integrasi memakai atmosfer manual dan ephemeris DE440 lokal.
 
 ---
 
@@ -543,7 +563,7 @@ pip install -r requirements.txt
 **Solusi**:
 - Cek koneksi internet
 - Pastikan API endpoint tidak sedang down:
-  - `https://archive-api.open-meteo.com` (ERA5)
+  - `https://archive-api.open-meteo.com` (ECMWF IFS)
   - `https://power.larc.nasa.gov` (MERRA-2)
 - Coba gunakan sumber atmosfer 'manual' jika API tidak accessible
 

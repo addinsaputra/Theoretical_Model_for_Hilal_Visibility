@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, Tuple
 import sys
 import os
+import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side, numbers
 from openpyxl.utils import get_column_letter
@@ -24,22 +25,17 @@ from telescope_limit import TelescopeVisibilityModel
 
 # Import modul cuaca ECMWF_IFS (Open-Meteo)
 from atmosfer_ecmwf_ifs import (
-    ObservingLocation, get_rh_t_at_time as ecmwf_ifs_get_rh_t,
-    ECMWF_IFSAPIError, apply_bias_correction
+    ObservingLocation, AtmosphericWindow, fetch_atmospheric_window,
+    ECMWF_IFSAPIError, apply_bias_correction, validate_atmosphere,
+    normalize_utc_datetime,
 )
+from atmosphere_provenance import atmosphere_audit_record, save_atmosphere_provenance
 
 # Import modul cuaca MERRA-2 (NASA POWER)
 from atmosfer_merra2 import (
     ObservingLocation as MERRA2Location,
     get_rh_t_at_time as merra2_get_rh_t,
     PowerAPIError
-)
-
-# Import modul cuaca BMKG (Prakiraan Cuaca)
-from atmosfer_bmkg import (
-    ObservingLocation as BMKGLocation,
-    get_rh_t_at_time_local as bmkg_get_rh_t_local,
-    BMKGAPIError
 )
 
 # Import modul data_hisab menggantikan sunmoon
@@ -93,9 +89,8 @@ class HilalVisibilityCalculator:
     
     # Mapping nama sumber atmosfer untuk label
     SUMBER_ATMOSFER_LABEL = {
-        'ecmwf_ifs': 'ECMWF IFS NWP Forecast (Open-Meteo API)',
+        'ecmwf_ifs': 'ECMWF IFS Historical (Open-Meteo API)',
         'merra2': 'MERRA-2 Reanalysis (NASA POWER API)',
-        'bmkg': 'BMKG Prakiraan Cuaca',
         'manual': 'Input Manual',
     }
 
@@ -111,7 +106,6 @@ class HilalVisibilityCalculator:
                  bias_t: float = 0.0,
                  bias_rh: float = 0.0,
                  sumber_atmosfer: str = 'ecmwf_ifs',
-                 adm4_code: str = '',
                  manual_rh: float = 80.0,
                  manual_t: float = 25.0,
                  manual_p: float = 1013.25):
@@ -141,9 +135,7 @@ class HilalVisibilityCalculator:
         bias_rh : float
             Bias RH reanalisis (%), definisi: bias = Reanalisis - Obs (default: 0.0)
         sumber_atmosfer : str
-            Sumber data atmosfer: 'ecmwf_ifs', 'merra2', 'bmkg', atau 'manual'
-        adm4_code : str
-            Kode wilayah BMKG (hanya untuk sumber 'bmkg')
+            Sumber data atmosfer: 'ecmwf_ifs', 'merra2', atau 'manual'
         manual_rh : float
             RH manual (%) jika sumber='manual'
         manual_t : float
@@ -162,7 +154,8 @@ class HilalVisibilityCalculator:
         self.bias_t = bias_t
         self.bias_rh = bias_rh
         self.sumber_atmosfer = sumber_atmosfer.lower()
-        self.adm4_code = adm4_code
+        if self.sumber_atmosfer not in self.SUMBER_ATMOSFER_LABEL:
+            raise ValueError(f"Sumber atmosfer tidak dikenal: '{sumber_atmosfer}'")
         self.manual_rh = manual_rh
         self.manual_t = manual_t
         self.manual_p = manual_p
@@ -177,17 +170,14 @@ class HilalVisibilityCalculator:
         # Hasil perhitungan akan disimpan di sini
         self.hasil: Dict[str, Any] = {}
 
-    def _estimasi_tekanan(self) -> float:
-        """Estimasi tekanan udara dari elevasi menggunakan rumus barometrik standar."""
-        return 1013.25 * (1 - 2.25577e-5 * self.elevasi) ** 5.25588
-
     def _fetch_atmosfer(self,
                         observing_location: ObservingLocation,
                         waktu_utc: datetime,
-                        verbose: bool = True) -> Tuple[float, float, float, float, float]:
+                        verbose: bool = True,
+                        *, record_provenance: bool = True) -> Tuple[float, float, float, float, float]:
         """
         Mengambil data atmosfer dan menerapkan koreksi bias.
-        Dispatch berdasarkan self.sumber_atmosfer: 'ecmwf_ifs', 'merra2', 'bmkg', atau 'manual'.
+        Dispatch berdasarkan self.sumber_atmosfer: 'ecmwf_ifs', 'merra2', atau 'manual'.
 
         Returns:
         --------
@@ -196,11 +186,15 @@ class HilalVisibilityCalculator:
         indent = "  " if verbose else "    "
         sumber = self.sumber_atmosfer
         label = self.SUMBER_ATMOSFER_LABEL.get(sumber, sumber.upper())
+        waktu_utc = normalize_utc_datetime(waktu_utc)
 
         if sumber == 'manual':
             rh_raw = self.manual_rh
             temperature_raw = self.manual_t
             pressure = self.manual_p
+            validate_atmosphere(rh_raw, temperature_raw, pressure)
+            if record_provenance:
+                self._record_atmosphere_point(observing_location, waktu_utc, rh_raw, temperature_raw, pressure)
             if verbose:
                 print(f"{indent}[âœ“] Data atmosfer MANUAL:")
                 print(f"{indent}     RH={rh_raw:.2f}%, T={temperature_raw:.2f}Â°C, P={pressure:.2f} mbar")
@@ -209,16 +203,18 @@ class HilalVisibilityCalculator:
 
         if sumber == 'ecmwf_ifs':
             try:
-                rh_raw, temperature_raw, pressure = ecmwf_ifs_get_rh_t(observing_location, waktu_utc)
+                window = fetch_atmospheric_window(observing_location, waktu_utc, waktu_utc)
+                rh_raw, temperature_raw, pressure = window.at_time(waktu_utc)
+                if record_provenance:
+                    self.hasil.setdefault('atmosphere_provenance', []).append(window.to_record())
                 if verbose:
                     print(f"{indent}[âœ“] Data atmosfer ECMWF_IFS berhasil diambil:")
                     print(f"{indent}     RH={rh_raw:.2f}%, T={temperature_raw:.2f}Â°C, P={pressure:.2f} mbar")
             except ECMWF_IFSAPIError as e:
                 if verbose:
                     print(f"{indent}[!] ECMWF_IFS API Error: {e}")
-                    print(f"{indent}[!] Data atmosfer TIDAK tersedia - Menggunakan nilai DEFAULT:")
-                    print(f"{indent}     RH=80.00%, T=25.00Â°C, P=1013.25 mbar")
-                rh_raw, temperature_raw, pressure = 80.0, 25.0, 1013.25
+                    print(f"{indent}[!] Observasi tidak valid: data atmosfer tidak tersedia.")
+                raise
 
         elif sumber == 'merra2':
             try:
@@ -236,36 +232,15 @@ class HilalVisibilityCalculator:
             except PowerAPIError as e:
                 if verbose:
                     print(f"{indent}[!] MERRA-2 API Error: {e}")
-                    print(f"{indent}[!] Data atmosfer TIDAK tersedia - Menggunakan nilai DEFAULT:")
-                    print(f"{indent}     RH=80.00%, T=25.00Â°C, P=1013.25 mbar")
-                rh_raw, temperature_raw, pressure = 80.0, 25.0, 1013.25
+                    print(f"{indent}[!] Observasi tidak valid: data atmosfer tidak tersedia.")
+                raise
 
-        elif sumber == 'bmkg':
-            try:
-                loc_bmkg = BMKGLocation(
-                    name=self.nama_tempat, latitude=self.lintang,
-                    longitude=self.bujur, altitude=self.elevasi,
-                    timezone=self.timezone_str, adm4_code=self.adm4_code
-                )
-                # BMKG menggunakan waktu lokal, konversi dari UTC
-                waktu_local = convert_utc_to_localtime(self.timezone_str, utc_datetime=waktu_utc)
-                # Hapus tzinfo karena BMKG menerima naive datetime
-                if hasattr(waktu_local, 'tzinfo') and waktu_local.tzinfo is not None:
-                    waktu_local = waktu_local.replace(tzinfo=None)
-                rh_raw, temperature_raw = bmkg_get_rh_t_local(loc_bmkg, waktu_local)
-                # BMKG tidak menyediakan tekanan, estimasi dari elevasi
-                pressure = self._estimasi_tekanan()
-                if verbose:
-                    print(f"{indent}[âœ“] Data atmosfer BMKG berhasil diambil:")
-                    print(f"{indent}     RH={rh_raw:.2f}%, T={temperature_raw:.2f}Â°C, P={pressure:.2f} mbar (estimasi)")
-            except BMKGAPIError as e:
-                if verbose:
-                    print(f"{indent}[!] BMKG API Error: {e}")
-                    print(f"{indent}[!] Data atmosfer TIDAK tersedia - Menggunakan nilai DEFAULT:")
-                    print(f"{indent}     RH=80.00%, T=25.00Â°C, P=1013.25 mbar")
-                rh_raw, temperature_raw, pressure = 80.0, 25.0, 1013.25
         else:
             raise ValueError(f"Sumber atmosfer tidak dikenal: '{sumber}'")
+
+        validate_atmosphere(rh_raw, temperature_raw, pressure)
+        if record_provenance and sumber != 'ecmwf_ifs':
+            self._record_atmosphere_point(observing_location, waktu_utc, rh_raw, temperature_raw, pressure)
 
         # Terapkan koreksi bias (untuk semua sumber API)
         rh, temperature, pressure = apply_bias_correction(
@@ -280,76 +255,63 @@ class HilalVisibilityCalculator:
 
         return rh_raw, temperature_raw, rh, temperature, pressure
 
-    def _fetch_atmosfer_dua_titik(self,
-                                   observing_location: ObservingLocation,
-                                   waktu_utc_0: datetime,
-                                   waktu_utc_1: datetime,
-                                   verbose: bool = True
-                                   ) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
-        """
-        Mengambil data atmosfer pada dua titik waktu untuk interpolasi linear.
+    def _atmosphere_metadata(self, location: ObservingLocation) -> Dict[str, Any]:
+        metadata = {
+            'source': self.SUMBER_ATMOSFER_LABEL[self.sumber_atmosfer],
+            'requested_latitude': location.latitude,
+            'requested_longitude': location.longitude,
+            'requested_elevation': location.altitude,
+            'time_axis_timezone': 'UTC',
+            'units': {'relative_humidity_2m': '%', 'temperature_2m': '°C',
+                      'surface_pressure': 'hPa'},
+            'sampling': 'manual input' if self.sumber_atmosfer == 'manual'
+                        else 'interpolated by provider adapter',
+        }
+        return metadata
 
-        Parameters
-        ----------
-        observing_location : ObservingLocation
-        waktu_utc_0 : datetime
-            Titik waktu pertama (sunset)
-        waktu_utc_1 : datetime
-            Titik waktu kedua (sunset + 1 jam)
+    def _record_atmosphere_point(self, location, time_utc, rh, temperature, pressure):
+        record = self._atmosphere_metadata(location)
+        record['hourly_raw'] = [{
+            'date': time_utc.isoformat(), 'relative_humidity_2m': float(rh),
+            'temperature_2m': float(temperature), 'surface_pressure': float(pressure),
+        }]
+        self.hasil.setdefault('atmosphere_provenance', []).append(record)
 
-        Returns
-        -------
-        atm_0 : (rh, temperature, pressure) pada waktu_utc_0
-        atm_1 : (rh, temperature, pressure) pada waktu_utc_1
-        """
+    def _fetch_atmosfer_window(self, observing_location: ObservingLocation,
+                              start_utc: datetime, end_utc: datetime,
+                              verbose: bool = True) -> AtmosphericWindow:
+        """Keep the real hourly anchors over the entire scan and refinement."""
+        start_utc = normalize_utc_datetime(start_utc)
+        end_utc = normalize_utc_datetime(end_utc)
+        if end_utc < start_utc:
+            raise ValueError('end_utc must not precede start_utc')
+        if self.sumber_atmosfer == 'ecmwf_ifs':
+            window = fetch_atmospheric_window(observing_location, start_utc, end_utc)
+        else:
+            lower = pd.Timestamp(start_utc).floor('h')
+            upper = pd.Timestamp(end_utc).ceil('h')
+            rows = []
+            for i, timestamp in enumerate(pd.date_range(lower, upper, freq='h')):
+                rh_raw, temperature_raw, _, _, pressure = self._fetch_atmosfer(
+                    observing_location, timestamp.to_pydatetime(), verbose=verbose and i == 0,
+                    record_provenance=False,
+                )
+                rows.append({'date': timestamp, 'relative_humidity_2m': rh_raw,
+                             'temperature_2m': temperature_raw, 'surface_pressure': pressure})
+            window = AtmosphericWindow(pd.DataFrame(rows), {
+                **self._atmosphere_metadata(observing_location),
+                'window_start_utc': start_utc.isoformat(), 'window_end_utc': end_utc.isoformat(),
+            })
+        self.hasil.setdefault('atmosphere_provenance', []).append(window.to_record())
         if verbose:
-            print(f"  Mengambil data atmosfer pada 2 titik untuk interpolasi...")
+            print(f"  Atmosfer hourly tersedia: {start_utc.isoformat()} - {end_utc.isoformat()}")
+        return window
 
-        _, _, rh_0, t_0, p_0 = self._fetch_atmosfer(
-            observing_location, waktu_utc_0, verbose=verbose
-        )
-        _, _, rh_1, t_1, p_1 = self._fetch_atmosfer(
-            observing_location, waktu_utc_1, verbose=False
-        )
-
-        if verbose:
-            w0_str = waktu_utc_0.strftime('%H:%M')
-            w1_str = waktu_utc_1.strftime('%H:%M')
-            print(f"    Titik 1 ({w0_str} UTC): RH={rh_0:.1f}%, T={t_0:.1f}Â°C, P={p_0:.1f} mbar")
-            print(f"    Titik 2 ({w1_str} UTC): RH={rh_1:.1f}%, T={t_1:.1f}Â°C, P={p_1:.1f} mbar")
-
-        return (rh_0, t_0, p_0), (rh_1, t_1, p_1)
-
-    @staticmethod
-    def _interpolasi_atmosfer(atm_0: Tuple[float, float, float],
-                               atm_1: Tuple[float, float, float],
-                               t0: datetime, t1: datetime,
-                               t: datetime) -> Tuple[float, float, float]:
-        """
-        Interpolasi linear data atmosfer antara dua titik waktu.
-
-        Parameters
-        ----------
-        atm_0 : (rh, temperature, pressure) pada t0
-        atm_1 : (rh, temperature, pressure) pada t1
-        t0, t1 : datetime â€” waktu referensi
-        t : datetime â€” waktu target
-
-        Returns
-        -------
-        (rh, temperature, pressure) hasil interpolasi
-        """
-        total = (t1 - t0).total_seconds()
-        if total <= 0:
-            return atm_0
-
-        frac = max(0.0, min(1.0, (t - t0).total_seconds() / total))
-
-        rh = atm_0[0] + frac * (atm_1[0] - atm_0[0])
-        temperature = atm_0[1] + frac * (atm_1[1] - atm_0[1])
-        pressure = atm_0[2] + frac * (atm_1[2] - atm_0[2])
-
-        return rh, temperature, pressure
+    def _atmosfer_pada_waktu(self, window: AtmosphericWindow, target_utc: datetime):
+        raw = window.at_time(target_utc)
+        if self.sumber_atmosfer == 'manual':
+            return raw
+        return apply_bias_correction(*raw, bias_t=self.bias_t, bias_rh=self.bias_rh)
 
     def hitung_ijtima(self) -> Tuple[datetime, datetime]:
         """
@@ -902,6 +864,7 @@ class HilalVisibilityCalculator:
             'telescope_gain': telescope_gain,
             'rh': rh,
             'temperature': temperature,
+            'pressure': pressure,
             'crumey_ne_C_th': crumey_ne['C_th'],
             'valid': True
         }
@@ -921,7 +884,7 @@ class HilalVisibilityCalculator:
         waktu optimal (delta_m maksimum).
 
         Perbaikan v2:
-        - Atmosfer di-fetch 2 titik (sunset & +1 jam), lalu diinterpolasi linear
+        - Atmosfer hourly mencakup seluruh scan dan refinement
         - Default interval 1 menit (sebelumnya 2 menit)
         - Refinement Â±2 menit di sekitar puncak dengan step 15 detik
         - Track window visibilitas kontinu (start, end, durasi terpanjang)
@@ -936,21 +899,24 @@ class HilalVisibilityCalculator:
         start_delay_menit : int
             Delay setelah sunset sebelum loop dimulai (default 1)
         """
+        if not math.isfinite(interval_menit) or interval_menit <= 0:
+            raise ValueError('interval_menit must be positive and finite')
+        if not math.isfinite(start_delay_menit) or start_delay_menit < 0:
+            raise ValueError('start_delay_menit must be nonnegative and finite')
         print(f"\n  Mencari visibilitas optimal (interval: {interval_menit} menit, "
               f"start delay: {start_delay_menit} menit)...")
 
-        # â”€â”€ Fetch atmosfer 2 titik untuk interpolasi â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # â”€â”€ Fetch atmosfer hourly untuk scan dan refinement â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         sunset_utc = convert_localtime_to_utc(self.timezone_str, local_datetime=sunset_local)
         if sunset_utc.tzinfo is None:
             sunset_utc = sunset_utc.replace(tzinfo=timezone.utc)
-        sunset_utc_plus1h = sunset_utc + timedelta(hours=1)
-
-        atm_0, atm_1 = self._fetch_atmosfer_dua_titik(
-            observing_location, sunset_utc, sunset_utc_plus1h, verbose=True
+        max_steps = 120
+        scan_start_utc = sunset_utc + timedelta(minutes=start_delay_menit)
+        scan_end_utc = scan_start_utc + timedelta(minutes=(max_steps - 1) * interval_menit)
+        atmosphere_window = self._fetch_atmosfer_window(
+            observing_location, scan_start_utc - timedelta(minutes=2),
+            scan_end_utc + timedelta(minutes=2), verbose=True,
         )
-        t0_utc = sunset_utc
-        t1_utc = sunset_utc_plus1h
-        print(f"  Atmosfer diinterpolasi linear antara sunset dan +1 jam")
 
         # â”€â”€ Inisialisasi tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         best_result_ne = None
@@ -983,7 +949,6 @@ class HilalVisibilityCalculator:
         all_results = []
         current_time = sunset_local + timedelta(minutes=start_delay_menit)
         step_count = 0
-        max_steps = 120
 
         # â”€â”€ Loop utama (kasar) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         while step_count < max_steps:
@@ -991,9 +956,7 @@ class HilalVisibilityCalculator:
             waktu_utc = convert_localtime_to_utc(self.timezone_str, local_datetime=current_time)
             if waktu_utc.tzinfo is None:
                 waktu_utc = waktu_utc.replace(tzinfo=timezone.utc)
-            rh, temperature, pressure = self._interpolasi_atmosfer(
-                atm_0, atm_1, t0_utc, t1_utc, waktu_utc
-            )
+            rh, temperature, pressure = self._atmosfer_pada_waktu(atmosphere_window, waktu_utc)
 
             result = self.hitung_visibilitas_pada_waktu(
                 current_time, observing_location, aperture, magnification,
@@ -1099,9 +1062,7 @@ class HilalVisibilityCalculator:
                 )
                 if waktu_utc_r.tzinfo is None:
                     waktu_utc_r = waktu_utc_r.replace(tzinfo=timezone.utc)
-                rh_r, temp_r, pres_r = self._interpolasi_atmosfer(
-                    atm_0, atm_1, t0_utc, t1_utc, waktu_utc_r
-                )
+                rh_r, temp_r, pres_r = self._atmosfer_pada_waktu(atmosphere_window, waktu_utc_r)
                 result_r = self.hitung_visibilitas_pada_waktu(
                     t_refine, observing_location, aperture, magnification,
                     F_naked=F_naked, field_factor=field_factor,
@@ -2186,6 +2147,9 @@ class HilalVisibilityCalculator:
             os.makedirs(output_dir, exist_ok=True)
 
         wb.save(filepath)
+        save_atmosphere_provenance(filepath, [atmosphere_audit_record(
+            self.nama_tempat, self.sumber_atmosfer, True, self.hasil,
+        )])
         print(f"\n  âœ“ Hasil disimpan ke: {filepath}")
 
         return filepath
@@ -2281,7 +2245,7 @@ def _input_mode_dan_offset():
     print("  1. H + 1 Hari             - Besoknya")
     print("  2. H + 2 Hari             - Lusanya")
     print(" -1. H - 1 Hari             - Kemarin")
-    print("  Catatan: ECMWF IFS (forecast/archive ~2017-sekarang), MERRA-2 (1981-sekarang), BMKG (3 hari ke depan)")
+    print("  Catatan: ECMWF IFS (arsip historis ~2017-sekarang), MERRA-2 (1981-sekarang)")
 
     try:
         offset_pilihan = input("\n  Pilih waktu (-2/-1/0/1/2) [enter=0]: ").strip()
@@ -2294,39 +2258,23 @@ def _input_mode_dan_offset():
     return mode, delta_day
 
 
-def _input_sumber_atmosfer(adm4_code: str = ''):
+def _input_sumber_atmosfer():
     """Input sumber data atmosfer. Return (sumber, manual_rh, manual_t, manual_p)."""
     print("\n--- LANGKAH 3.6: SUMBER DATA ATMOSFER ---")
     print("  Pilih sumber data atmosfer (RH, T, P):")
-    print("  1. ECMWF IFS NWP Forecast (Open-Meteo API)  - data prakiraan & arsip ~2017-sekarang")
+    print("  1. ECMWF IFS Historical (Open-Meteo API)  - data arsip historis ~2017-sekarang")
     print("  2. MERRA-2          (NASA POWER API)   â€” data historis 1981-sekarang")
-    if adm4_code:
-        print(f"  3. BMKG Forecast    (API Prakiraan)    â€” prakiraan 3 hari [kode: {adm4_code}]")
-    else:
-        print("  3. BMKG Forecast    (API Prakiraan)    â€” prakiraan 3 hari (butuh kode wilayah)")
-    print("  4. Input Manual     (tanpa API)        â€” masukkan RH, T, P secara manual")
+    print("  3. Input Manual     (tanpa API)        â€” masukkan RH, T, P secara manual")
 
     manual_rh, manual_t, manual_p = 80.0, 25.0, 1013.25
 
     try:
-        pilihan = input("\n  Pilih sumber (1/2/3/4) [enter=1]: ").strip() or "1"
+        pilihan = input("\n  Pilih sumber (1/2/3) [enter=1]: ").strip() or "1"
 
         if pilihan == "2":
             sumber = 'merra2'
             print(f"  âœ“ Sumber atmosfer: MERRA-2 (NASA POWER API)")
         elif pilihan == "3":
-            sumber = 'bmkg'
-            if not adm4_code:
-                adm4_input = input("  Masukkan kode wilayah BMKG (contoh: 33.74.10.1003): ").strip()
-                if adm4_input:
-                    adm4_code = adm4_input
-                else:
-                    print("  [!] Kode wilayah kosong. Fallback ke ECMWF IFS.")
-                    sumber = 'ecmwf_ifs'
-            if sumber == 'bmkg':
-                print(f"  âœ“ Sumber atmosfer: BMKG Prakiraan Cuaca [kode: {adm4_code}]")
-                print(f"  âš  BMKG tidak menyediakan tekanan udara â€” tekanan diestimasi dari elevasi.")
-        elif pilihan == "4":
             sumber = 'manual'
             print("  Masukkan data atmosfer secara manual:")
             try:
@@ -2343,12 +2291,12 @@ def _input_sumber_atmosfer(adm4_code: str = ''):
             print(f"    RH={manual_rh:.2f}%, T={manual_t:.2f}Â°C, P={manual_p:.2f} mbar")
         else:
             sumber = 'ecmwf_ifs'
-            print(f"  âœ“ Sumber atmosfer: ECMWF IFS NWP Forecast (Open-Meteo API)")
+            print(f"  âœ“ Sumber atmosfer: ECMWF IFS Historical (Open-Meteo API)")
     except EOFError:
         sumber = 'ecmwf_ifs'
-        print(f"  âœ“ Sumber default: ECMWF IFS NWP Forecast")
+        print(f"  âœ“ Sumber default: ECMWF IFS Historical")
 
-    return sumber, adm4_code, manual_rh, manual_t, manual_p
+    return sumber, manual_rh, manual_t, manual_p
 
 
 def _input_koreksi_bias(bias_t: float, bias_rh: float, sumber_atmosfer: str = 'ecmwf_ifs'):
@@ -2423,7 +2371,7 @@ def _input_koreksi_bias_multi(lokasi_list: list, sumber_atmosfer: str = 'ecmwf_i
     lokasi_list : list[dict]
         Daftar lokasi yang dipilih
     sumber_atmosfer : str
-        Sumber data atmosfer ('ecmwf_ifs', 'merra2', 'bmkg', 'manual')
+        Sumber data atmosfer ('ecmwf_ifs', 'merra2', 'manual')
 
     Returns:
     --------
@@ -2752,7 +2700,6 @@ def _run_multi_lokasi(lokasi_list: list, shared_params: dict) -> list:
                 bias_t=_resolve_bias_t(lokasi, shared_params),
                 bias_rh=_resolve_bias_rh(lokasi, shared_params),
                 sumber_atmosfer=shared_params['sumber_atmosfer'],
-                adm4_code=lokasi.get('adm4_code', '') or shared_params.get('adm4_code', ''),
                 manual_rh=shared_params.get('manual_rh', 80.0),
                 manual_t=shared_params.get('manual_t', 25.0),
                 manual_p=shared_params.get('manual_p', 1013.25),
@@ -3131,6 +3078,12 @@ def _simpan_excel_multi(results: list, shared_params: dict, filepath: str) -> st
         os.makedirs(output_dir, exist_ok=True)
 
     wb.save(filepath)
+    save_atmosphere_provenance(filepath, [
+        atmosphere_audit_record(
+            r['lokasi'].get('nama', ''), shared_params['sumber_atmosfer'],
+            r['success'], r.get('hasil'), r.get('error'),
+        ) for r in results
+    ])
     print(f"\n  âœ“ Hasil multi-lokasi disimpan ke: {filepath}")
     return filepath
 
@@ -3428,7 +3381,6 @@ def _main_single():
     lintang = lokasi.get("lat", lokasi.get("lintang", 0.0))
     bujur = lokasi.get("lon", lokasi.get("bujur", 0.0))
     elevasi = lokasi.get("elevasi", lokasi.get("elv", 0.0))
-    adm4_code = lokasi.get("adm4_code", "")
     bias_t = lokasi.get("bias_t", 0.0)
     bias_rh = lokasi.get("bias_rh", 0.0)
     timezone_str = tentukan_timezone_indonesia(bujur)
@@ -3437,8 +3389,6 @@ def _main_single():
     print(f"  Koordinat : {lintang}Â°, {bujur}Â°")
     print(f"  Elevasi   : {elevasi} m")
     print(f"  Timezone  : {timezone_str}")
-    if adm4_code:
-        print(f"  Kode BMKG : {adm4_code}")
     if bias_t != 0.0 or bias_rh != 0.0:
         print(f"  Bias Data : T={bias_t:+.1f}Â°C, RH={bias_rh:+.1f}%")
 
@@ -3452,7 +3402,7 @@ def _main_single():
     mode, delta_day = _input_mode_dan_offset()
 
     # LANGKAH 3.6: Sumber Data Atmosfer
-    sumber_atmosfer, adm4_code, manual_rh, manual_t, manual_p = _input_sumber_atmosfer(adm4_code)
+    sumber_atmosfer, manual_rh, manual_t, manual_p = _input_sumber_atmosfer()
 
     # LANGKAH 3.7: Koreksi Bias
     bias_t, bias_rh = _input_koreksi_bias(bias_t, bias_rh, sumber_atmosfer)
@@ -3478,7 +3428,6 @@ def _main_single():
         bias_t=bias_t,
         bias_rh=bias_rh,
         sumber_atmosfer=sumber_atmosfer,
-        adm4_code=adm4_code,
         manual_rh=manual_rh,
         manual_t=manual_t,
         manual_p=manual_p
@@ -3556,8 +3505,7 @@ def _main_multi():
     mode, delta_day = _input_mode_dan_offset()
 
     # LANGKAH 3.6: Sumber Data Atmosfer (shared)
-    # Untuk multi-lokasi, adm4_code diambil per lokasi atau fallback ke kode yang diinput
-    sumber_atmosfer, adm4_code_input, manual_rh, manual_t, manual_p = _input_sumber_atmosfer('')
+    sumber_atmosfer, manual_rh, manual_t, manual_p = _input_sumber_atmosfer()
 
     # LANGKAH 3.7: Koreksi Bias
     bias_mode = _input_koreksi_bias_multi(lokasi_list, sumber_atmosfer)
@@ -3573,7 +3521,6 @@ def _main_multi():
         'mode': mode,
         'delta_day': delta_day,
         'sumber_atmosfer': sumber_atmosfer,
-        'adm4_code': adm4_code_input,
         'manual_rh': manual_rh,
         'manual_t': manual_t,
         'manual_p': manual_p,

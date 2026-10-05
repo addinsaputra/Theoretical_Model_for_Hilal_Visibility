@@ -20,7 +20,7 @@ CARA PAKAI:
       python batch_validation_crumey.py
 
 PRASYARAT:
-  - Koneksi internet (untuk ERA5 API)
+  - Koneksi internet (untuk ECMWF IFS API)
   - Semua modul Core/ sudah terinstall dan berfungsi
   - File de440s.bsp ada di direktori data-hisab/
 
@@ -44,6 +44,7 @@ from core_crescent_visibility import (
     HilalVisibilityCalculator,
     tentukan_timezone_indonesia,
 )
+from atmosphere_provenance import atmosphere_audit_record, save_atmosphere_provenance
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -67,7 +68,7 @@ TEL_PARAMS = dict(
 
 # --- Mode perhitungan ---
 CALC_MODE = "optimal"       # "sunset" atau "optimal"
-SUMBER_ATMOSFER = "era5"    # "era5", "merra2", "manual"
+SUMBER_ATMOSFER = "ecmwf_ifs"    # "ecmwf_ifs", "merra2", "manual"
 
 # --- Interval loop optimal ---
 INTERVAL_MENIT = 1
@@ -119,10 +120,10 @@ def _input_konfigurasi_interaktif():
 
     # --- Sumber atmosfer ---
     print("\n  ── Sumber Data Atmosfer ──")
-    print(f"  Pilihan: 1=era5, 2=merra2, 3=manual")
+    print(f"  Pilihan: 1=ecmwf_ifs, 2=merra2, 3=manual")
     atm_input = input(f"  Sumber atmosfer [{SUMBER_ATMOSFER}]: ").strip().lower()
-    if atm_input in ("1", "era5"):
-        SUMBER_ATMOSFER = "era5"
+    if atm_input in ("1", "ecmwf_ifs"):
+        SUMBER_ATMOSFER = "ecmwf_ifs"
     elif atm_input in ("2", "merra2"):
         SUMBER_ATMOSFER = "merra2"
     elif atm_input in ("3", "manual"):
@@ -176,7 +177,7 @@ def _input_konfigurasi_interaktif():
 # ═══════════════════════════════════════════════════════════════════
 # Format per entry:
 #   no, tanggal (YYYY-MM-DD), nama lokasi,
-#   lat, lon, elv, adm4_code,
+#   lat, lon, elv,
 #   bulan_hijri, tahun_hijri,
 #   bias_t, bias_rh,
 #   observed (True=Y, False=N)
@@ -184,101 +185,101 @@ def _input_konfigurasi_interaktif():
 OBSERVATIONS = [
     # ── Muharram 1444 (29 Juli 2022) ─────────────────────────────
     ( 1, "2022-07-29", "Rooftop Observatorium UIN WS",
-      -6.99167, 110.34806, 89.0, "33.74.15.1010",
+      -6.99167, 110.34806, 89.0,
        1, 1444,  -1, 2,  False),
     ( 2, "2022-07-29", "Tower Hilal Sulamu_BMKG Kupang",
-      -10.14333, 123.62667, 10.42, "53.01.07.2001",
+      -10.14333, 123.62667, 10.42,
        1, 1444,  -1, -2,  True),
     ( 3, "2022-07-29", "Hotel mina tanjung",
-      -8.346986, 116.149, 6.0, "52.08.01.2001",
+      -8.346986, 116.149, 6.0,
        1, 1444,  -1, 2,  False),
     ( 4, "2022-07-29", "Pantai Lhoknga_chiek kuta_BMKG Aceh Besar",
-       5.46667, 95.24233, 11.65, "11.06.02.2001",
+       5.46667, 95.24233, 11.65,
        1, 1444,  -1, 4,  False),
     ( 5, "2022-07-29", "POB Condrodipo",
-      -7.16967, 112.61733, 61.0, "35.25.14.2002",
+      -7.16967, 112.61733, 61.0,
        1, 1444,   0, -4,  False),
     ( 6, "2022-07-29", "Tower Hilal Marana_BMKG Palu",
-      -0.57861, 119.79070, 17.49, "72.03.10.2007",
+      -0.57861, 119.79070, 17.49,
        1, 1444,  -4, 10,  False),
     ( 7, "2022-07-29", "Tower Hilal Cikelet",
-      -7.59367, 107.62350, 7.0, "32.05.02.2005",
+      -7.59367, 107.62350, 7.0,
        1, 1444,  -1, 2,  False),
     ( 8, "2022-07-29", "Lapangan Tembak Desa Kebutuhjurang_BMKG Banjarnegara",
-      -7.480125, 109.677931, 496.0, "33.04.20.2005",
+      -7.480125, 109.677931, 496.0,
        1, 1444,   0, 0,  False),
     ( 9, "2022-07-29", "POB Syekh Bela-Belu",
-      -7.73983, 110.35017, 45.0, "34.02.04.2005",
+      -7.73983, 110.35017, 45.0,
        1, 1444,   0, 0,  False),
     (10, "2022-07-29", "Tower Hilal Ternate",
-      -0.79983, 127.29483, 33.61, "82.71.01.1005",
+      -0.79983, 127.29483, 33.61,
        1, 1444,  -1, 2,  False),
 
     # ── Ramadhan 1444 (22 Maret 2023) ────────────────────────────
     (11, "2023-03-22", "Rooftop Observatorium UIN WS",
-      -6.99167, 110.34806, 89.0, "33.74.15.1010",
+      -6.99167, 110.34806, 89.0,
        9, 1444,  -1, 2,  False),
     (12, "2023-03-22", "POB Pedalen Kebumen_BMKG Banjarnegara",
-      -7.731322, 109.390878, 9.0, "33.05.01.2001",
+      -7.731322, 109.390878, 9.0,
        9, 1444,   0, 0,  False),
     (13, "2023-03-22", "Pantai Loang Baloq-MATARAM",
-      -8.60408, 116.07440, 5.0, "52.71.04.1002",
+      -8.60408, 116.07440, 5.0,
        9, 1444,  -1, 2,  True),
     (14, "2023-03-22", "Tower Hilal Marana_BMKG Palu",
-      -0.57861, 119.79070, 17.49, "72.03.10.2007",
+      -0.57861, 119.79070, 17.49,
        9, 1444,  -4, 10,  True),
     (15, "2023-03-22", "Pantai Lhoknga_chiek kuta_BMKG Aceh Besar",
-       5.46667, 95.24233, 11.65, "11.06.02.2001",
+       5.46667, 95.24233, 11.65,
        9, 1444,  -1, 4,  True),
     (16, "2023-03-22", "Tower Hilal Meras_MTC Manado_BMKG Manado",
-       1.48033, 124.83367, 15.14, "71.71.06.1005",
+       1.48033, 124.83367, 15.14,
        9, 1444,  -1, 4,  False),
     (17, "2023-03-22", "POB Cibeas Pel. Ratu",
-      -7.07400, 106.53133, 114.0, "32.02.02.2003",
+      -7.07400, 106.53133, 114.0,
        9, 1444,   0, -2,  False),
     (18, "2023-03-22", "POB Syekh Bela-Belu",
-      -7.73983, 110.35017, 45.0, "34.02.04.2005",
+      -7.73983, 110.35017, 45.0,
        9, 1444,   0, 0,  False),
     (19, "2023-03-22", "Tower Hilal Cikelet",
-      -7.59367, 107.62350, 7.0, "32.05.02.2005",
+      -7.59367, 107.62350, 7.0,
        9, 1444,  -1, 2,  False),
     (20, "2023-03-22", "Gedung BMKG NTT-Kupang",
-      -10.15278, 123.60833, 40.0, "53.71.06.1007",
+      -10.15278, 123.60833, 40.0,
        9, 1444,  -1, -2,  False),
  
     # ── Syawal 1445 (9 April 2024) ───────────────────────────────
     (21, "2024-04-09", "Rooftop Observatorium UIN WS",
-      -6.99167, 110.34806, 89.0, "33.74.15.1010",
+      -6.99167, 110.34806, 89.0,
       10, 1445,  -1, 2,  False),
     (22, "2024-04-09", "POB Pedalen Kebumen_BMKG Banjarnegara",
-      -7.731322, 109.390878, 9.0, "33.05.01.2001",
+      -7.731322, 109.390878, 9.0,
       10, 1445,   0, 0,  False),
     (23, "2024-04-09", "Tower Hilal Meras_MTC Manado_BMKG Manado",
-       1.48033, 124.83367, 15.14, "71.71.06.1005",
+       1.48033, 124.83367, 15.14,
       10, 1445,  -1, 4,  True),
     (24, "2024-04-09", "Pantai Loang Baloq-MATARAM",
-      -8.60408, 116.07440, 5.0, "52.71.04.1002",
+      -8.60408, 116.07440, 5.0,
       10, 1445,  -1, 2,  False),
     (25, "2024-04-09", "Pantai Lhoknga_chiek kuta_BMKG Aceh Besar",
-       5.46667, 95.24233, 11.65, "11.06.02.2001",
+       5.46667, 95.24233, 11.65,
       10, 1445,  -1, 4,  False),
     (26, "2024-04-09", "Gedung BMKG NTT-Kupang",
-      -10.15278, 123.60833, 40.0, "53.71.06.1007",
+      -10.15278, 123.60833, 40.0,
       10, 1445,  -1, -2,  False),
     (27, "2024-04-09", "Tower Hilal Ternate",
-      -0.79983, 127.29483, 33.61, "82.71.01.1005",
+      -0.79983, 127.29483, 33.61,
       10, 1445,  -1, 2,  False),
     (28, "2024-04-09", "Pantai Ngliyep Malang_BMKG Malang",
-      -8.35000, 112.43333, 10.0, "35.07.15.2001",
+      -8.35000, 112.43333, 10.0,
       10, 1445,   0, 0,  False),
     (29, "2024-04-09", "Tower Hilal Marana_BMKG Palu",
-      -0.57861, 119.79070, 17.49, "72.03.10.2007",
+      -0.57861, 119.79070, 17.49,
       10, 1445,  -4, 10,  False),
     (30, "2024-04-09", "kantor stageof lampung utara_BMKG Lampung Utara",
-       4.836136, 104.87005, 33.0, "18.03.07.1007",
+       4.836136, 104.87005, 33.0,
       10, 1445,  -1, 6,  False),
     (31, "2024-04-09", "POB Syekh Bela-Belu",
-      -7.73983, 110.35017, 45.0, "34.02.04.2005",
+      -7.73983, 110.35017, 45.0,
       10, 1445,   0, 0,  False), 
 ]
 
@@ -299,12 +300,11 @@ def parse_obs(entry: tuple) -> dict:
         'lat': entry[3],
         'lon': entry[4],
         'elv': entry[5],
-        'adm4': entry[6],
-        'bulan_hijri': entry[7],
-        'tahun_hijri': entry[8],
-        'bias_t': entry[9],
-        'bias_rh': entry[10],
-        'observed': entry[11],  # True = Y, False = N
+        'bulan_hijri': entry[6],
+        'tahun_hijri': entry[7],
+        'bias_t': entry[8],
+        'bias_rh': entry[9],
+        'observed': entry[10],  # True = Y, False = N
     }
 
 
@@ -345,7 +345,6 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
             bias_t=obs['bias_t'],
             bias_rh=obs['bias_rh'],
             sumber_atmosfer=SUMBER_ATMOSFER,
-            adm4_code=obs['adm4'],
         )
 
         hasil = calc.jalankan_perhitungan_lengkap(
@@ -391,6 +390,10 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
             'elv': obs['elv'],
             'observed': obs['observed'],
             'success': True,
+            'sumber_atmosfer': hasil.get('sumber_atmosfer', SUMBER_ATMOSFER),
+            'bias_t': hasil.get('bias_t', obs.get('bias_t', 0.0)),
+            'bias_rh': hasil.get('bias_rh', obs.get('bias_rh', 0.0)),
+            'atmosphere_provenance': hasil.get('atmosphere_provenance', []),
 
             # Hasil saat sunset
             'sunset_local': sunset_local_dt,
@@ -916,6 +919,11 @@ def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Data
         for ci, (key, _) in enumerate(geometry_columns, 55):
             row_data[ci] = r.get(key) if r.get('success') else None
 
+        if not r.get('success'):
+            for ci in range(9, 47):
+                row_data[ci] = None
+            row_data[48] = 'ERROR'
+
         for ci, val in row_data.items():
             if isinstance(val, float) and not math.isfinite(val):
                 val = str(val)
@@ -1019,12 +1027,22 @@ def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Data
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
     wb.save(filepath)
+    _save_batch_atmosphere_provenance(results, filepath)
     print(f"\n  \u2713 Excel disimpan: {filepath}")
 
 
 # ═══════════════════════════════════════════════════════════════════
 # CSV OUTPUT
 # ═══════════════════════════════════════════════════════════════════
+
+def _save_batch_atmosphere_provenance(results, filepath):
+    save_atmosphere_provenance(filepath, [
+        atmosphere_audit_record(
+            r.get('nama', ''), r.get('sumber_atmosfer', SUMBER_ATMOSFER),
+            r.get('success', False), r, r.get('error'),
+        ) for r in results
+    ])
+
 
 def save_to_csv(results: List[dict], filepath: str):
     """Simpan hasil ke file CSV dengan format flat yang mudah dibaca program.
@@ -1058,6 +1076,7 @@ def save_to_csv(results: List[dict], filepath: str):
         'moon_semidiameter_deg_BT', 'moon_distance_km_BT',
         'moon_semidiameter_deg_NE_Optimal', 'moon_distance_km_NE_Optimal',
         'Phase_Angle_BT',
+        'Status', 'Error',
     ]
 
     out_dir = os.path.dirname(filepath)
@@ -1141,10 +1160,13 @@ def save_to_csv(results: List[dict], filepath: str):
                 _full(r.get('opt_ne_moon_semidiameter')),
                 _full(r.get('opt_ne_moon_distance_km')),
                 _full(r.get('opt_tel_phase_angle')),
+                'valid' if r.get('success') else 'invalid',
+                r.get('error', ''),
             ]
 
             writer.writerow(row)
 
+    _save_batch_atmosphere_provenance(results, filepath)
     print(f"  \u2713 CSV disimpan : {filepath}")
 
 

@@ -197,7 +197,7 @@ class IntegrationAndExportTests(unittest.TestCase):
                                                'lon': 110.348, 'elv': 89}, hasil=cls.hasil)]
         obs = dict(no=1, nama='Uji Semarang', tanggal='2023-03-22', lat=-6.917,
                    lon=110.348, elv=89, bulan_hijri=9, tahun_hijri=1444,
-                   bias_t=0, bias_rh=0, adm4='', observed=True)
+                   bias_t=0, bias_rh=0, observed=True)
         with patch('core_multi_location.HilalVisibilityCalculator') as calculator:
             calculator.return_value.jalankan_perhitungan_lengkap.return_value = cls.hasil
             with contextlib.redirect_stdout(io.StringIO()):

@@ -1,28 +1,57 @@
-﻿"""
-Open-Meteo ECMWF_IFS API Client Module
-Modul untuk mengambil data cuaca historis dari Open-Meteo API (ECMWF_IFS)
+"""Historical ECMWF IFS through Open-Meteo, with UTC hourly interpolation.
+
+RH and surface pressure are Open-Meteo derived variables. Temperature and
+pressure are downscaled to the requested site elevation; these are not raw
+ECMWF grid fields. Missing atmospheric samples raise ECMWF_IFSAPIError.
 """
 
+from bisect import bisect_left
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone as utc_timezone
+import math
+from typing import Any, Dict, List, Optional, Tuple
+
 import openmeteo_requests
+from openmeteo_sdk.Model import Model
+from openmeteo_sdk.Unit import Unit
+from openmeteo_sdk.Variable import Variable
 import pandas as pd
 import requests_cache
 from retry_requests import retry
-from dataclasses import dataclass
-from typing import List, Optional, Dict, Any, Tuple
-from datetime import datetime
 
 
-# Setup the Open-Meteo API client with cache and retry on error
+ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+IFS_MODEL = "ecmwf_ifs"
+ATMOSPHERIC_VARIABLES = (
+    "temperature_2m", "relative_humidity_2m", "surface_pressure", "dew_point_2m",
+)
+_VARIABLE_SPECS = {
+    "temperature_2m": (Variable.temperature, Unit.celsius, "°C"),
+    "relative_humidity_2m": (Variable.relative_humidity, Unit.percentage, "%"),
+    "surface_pressure": (Variable.surface_pressure, Unit.hectopascal, "hPa"),
+    "dew_point_2m": (Variable.dew_point, Unit.celsius, "°C"),
+}
 _cache_session = None
 _retry_session = None
 _openmeteo = None
 
 
+class ECMWF_IFSAPIError(RuntimeError):
+    """Unavailable, malformed, or invalid atmospheric data from Open-Meteo."""
+
+
+@dataclass(frozen=True)
+class ObservingLocation:
+    """Site coordinates, elevation above sea level (m), and IANA timezone."""
+
+    name: str
+    latitude: float
+    longitude: float
+    altitude: float
+    timezone: str
+
+
 def _get_client():
-    """
-    Menginisialisasi dan mengembalikan Open-Meteo API client.
-    Menggunakan singleton pattern untuk menghindari inisialisasi ganda.
-    """
     global _cache_session, _retry_session, _openmeteo
     if _openmeteo is None:
         _cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
@@ -31,97 +60,43 @@ def _get_client():
     return _openmeteo
 
 
-def fetch_hourly_weather(
-    latitude: float,
-    longitude: float,
-    start_date: str,
-    end_date: str,
-    hourly_variables: Optional[List[str]] = None,
-    timezone: str = "auto"
-) -> pd.DataFrame:
-    """
-    Mengambil data cuaca hourly dari Open-Meteo Archive API.
+def normalize_utc_datetime(value: datetime) -> datetime:
+    """Accept any aware datetime and normalize before choosing UTC dates."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("Atmospheric times must be timezone-aware")
+    return value.astimezone(utc_timezone.utc)
 
-    Args:
-        latitude: Garis lintang lokasi (contoh: -6.9666 untuk Semarang)
-        longitude: Garis bujur lokasi (contoh: 110.45 untuk Semarang)
-        start_date: Tanggal mulai dalam format YYYY-MM-DD
-        end_date: Tanggal akhir dalam format YYYY-MM-DD
-        hourly_variables: Daftar variabel hourly yang diambil.
-                         Default: ["temperature_2m", "relative_humidity_2m"]
-        timezone: Timezone untuk output data. Default: "auto"
 
-    Returns:
-        pd.DataFrame: DataFrame berisi data cuaca hourly dengan kolom date
-                     dan variabel-variabel yang diminta.
-
-    Example:
-        >>> df = fetch_hourly_weather(
-        ...     latitude=-6.9666,
-        ...     longitude=110.45,
-        ...     start_date="2025-11-01",
-        ...     end_date="2025-11-01"
-        ... )
-        >>> print(df.head())
-    """
-    if hourly_variables is None:
-        hourly_variables = ["temperature_2m", "relative_humidity_2m"]
-
-    # Setup client
-    openmeteo = _get_client()
-
-    # Setup URL dan parameters
-    url = "https://archive-api.open-meteo.com/v1/archive"
-    params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "start_date": start_date,
-        "end_date": end_date,
-        "hourly": hourly_variables,
-        "timezone": timezone,
-    }
-
-    # Fetch data dari API
-    responses = openmeteo.weather_api(url, params=params)
-
-    # Process response (ambil response pertama)
-    response = responses[0]
-
-    # Extract hourly data
-    hourly = response.Hourly()
-    hourly_data = {
-        "date": pd.date_range(
-            start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
-            end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
-            freq=pd.Timedelta(seconds=hourly.Interval()),
-            inclusive="left"
+def validate_atmosphere(rh: float, temperature: float, pressure: float) -> None:
+    """Reject invalid input rather than converting it into plausible weather."""
+    try:
+        valid = all(math.isfinite(v) for v in (rh, temperature, pressure))
+        valid = valid and 0 <= rh <= 100 and temperature > -273.15 and pressure > 0
+    except (TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise ECMWF_IFSAPIError(
+            f"Invalid atmosphere: RH={rh!r} %, T={temperature!r} °C, P={pressure!r} hPa"
         )
-    }
 
-    # Extract semua variabel yang diminta
-    for i, var_name in enumerate(hourly_variables):
-        hourly_data[var_name] = hourly.Variables(i).ValuesAsNumpy()
 
-    return pd.DataFrame(data=hourly_data)
+def _decode_text(value):
+    return value.decode("utf-8") if isinstance(value, bytes) else value
 
 
 def get_location_info(response) -> Dict[str, Any]:
-    """
-    Mengambil informasi lokasi dari respons API.
+    """Returned grid coordinates and effective elevation used for downscaling.
 
-    Args:
-        response: Response object dari Open-Meteo API
-
-    Returns:
-        Dict berisi informasi koordinat, elevasi, dan timezone
+    The returned elevation can equal the requested elevation. It must not be
+    interpreted as the native ECMWF grid elevation.
     """
     return {
-        "latitude": response.Latitude(),
-        "longitude": response.Longitude(),
-        "elevation": response.Elevation(),
-        "timezone": response.Timezone(),
-        "timezone_abbreviation": response.TimezoneAbbreviation(),
-        "utc_offset_seconds": response.UtcOffsetSeconds()
+        "latitude": float(response.Latitude()),
+        "longitude": float(response.Longitude()),
+        "elevation": float(response.Elevation()),
+        "timezone": _decode_text(response.Timezone()),
+        "timezone_abbreviation": _decode_text(response.TimezoneAbbreviation()),
+        "utc_offset_seconds": int(response.UtcOffsetSeconds()),
     }
 
 
@@ -132,305 +107,248 @@ def fetch_weather_with_info(
     end_date: str,
     hourly_variables: Optional[List[str]] = None,
     timezone: str = "auto",
-    print_info: bool = False
-) -> tuple[pd.DataFrame, Dict[str, Any]]:
+    print_info: bool = False,
+    *,
+    elevation: Optional[float] = None,
+    cell_selection: str = "land",
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Fetch pinned IFS data and provenance using a single request/parser.
+
+    Dates follow the requested API timezone; the DataFrame date column is
+    always UTC. Unavailable values remain NaN in this low-level table; the
+    atmospheric window validates every sample needed for interpolation.
+    Existing positional arguments remain supported; elevation is keyword-only.
     """
-    Mengambil data cuaca hourly beserta informasi lokasi.
-
-    Args:
-        latitude: Garis lintang lokasi
-        longitude: Garis bujur lokasi
-        start_date: Tanggal mulai (YYYY-MM-DD)
-        end_date: Tanggal akhir (YYYY-MM-DD)
-        hourly_variables: Daftar variabel hourly
-        timezone: Timezone untuk output
-        print_info: Jika True, print informasi lokasi ke console
-
-    Returns:
-        Tuple (DataFrame, Dict): DataFrame data cuaca dan dict informasi lokasi
-    """
-    if hourly_variables is None:
-        hourly_variables = ["temperature_2m", "relative_humidity_2m"]
-
-    openmeteo = _get_client()
-
-    url = "https://archive-api.open-meteo.com/v1/archive"
+    if not math.isfinite(latitude) or not -90 <= latitude <= 90:
+        raise ValueError("latitude must be finite and in [-90, 90]")
+    if not math.isfinite(longitude) or not -180 <= longitude <= 180:
+        raise ValueError("longitude must be finite and in [-180, 180]")
+    if elevation is not None and not math.isfinite(elevation):
+        raise ValueError("elevation must be finite")
+    if date.fromisoformat(start_date) > date.fromisoformat(end_date):
+        raise ValueError("start_date must not follow end_date")
+    if cell_selection not in ("land", "sea", "nearest"):
+        raise ValueError("cell_selection must be land, sea, or nearest")
+    variables = list(hourly_variables) if hourly_variables is not None else [
+        "temperature_2m", "relative_humidity_2m",
+    ]
+    if not variables or len(set(variables)) != len(variables):
+        raise ValueError("hourly_variables must be nonempty and unique")
     params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "start_date": start_date,
-        "end_date": end_date,
-        "hourly": hourly_variables,
-        "timezone": timezone,
+        "latitude": latitude, "longitude": longitude,
+        "start_date": start_date, "end_date": end_date,
+        "hourly": variables, "timezone": timezone,
+        "models": IFS_MODEL, "cell_selection": cell_selection,
+        "temperature_unit": "celsius",
     }
-
-    responses = openmeteo.weather_api(url, params=params)
-    response = responses[0]
-
-    # Get location info
-    location_info = get_location_info(response)
-
-    if print_info:
-        print(f"\nCoordinates: {location_info['latitude']}Â°N {location_info['longitude']}Â°E")
-        print(f"Elevation: {location_info['elevation']} m asl")
-        print(f"Timezone: {location_info['timezone']}{location_info['timezone_abbreviation']}s")
-        print(f"Timezone difference to GMT+0: {location_info['utc_offset_seconds']}s")
-
-    # Get hourly data
-    hourly = response.Hourly()
-    hourly_data = {
-        "date": pd.date_range(
+    if elevation is not None:
+        params["elevation"] = elevation
+    try:
+        responses = _get_client().weather_api(ARCHIVE_URL, params=params, timeout=30)
+        if len(responses) != 1:
+            raise ECMWF_IFSAPIError("Expected one ECMWF IFS response")
+        response = responses[0]
+        if response.Model() != Model.ecmwf_ifs:
+            raise ECMWF_IFSAPIError("Response does not identify the requested ECMWF IFS model")
+        hourly = response.Hourly()
+        if hourly is None or hourly.Interval() != 3600 or hourly.TimeEnd() <= hourly.Time():
+            raise ECMWF_IFSAPIError("Missing or invalid hourly time axis")
+        if hourly.VariablesLength() != len(variables):
+            raise ECMWF_IFSAPIError("Unexpected number of hourly variables")
+        times = pd.date_range(
             start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
             end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
-            freq=pd.Timedelta(seconds=hourly.Interval()),
-            inclusive="left"
+            freq="h", inclusive="left",
         )
-    }
+        data = {"date": times}
+        units = {}
+        for i, name in enumerate(variables):
+            variable = hourly.Variables(i)
+            if name in _VARIABLE_SPECS:
+                variable_id, unit_id, unit_label = _VARIABLE_SPECS[name]
+                if (variable.Variable() != variable_id or variable.Unit() != unit_id
+                        or (name != "surface_pressure" and variable.Altitude() != 2)):
+                    raise ECMWF_IFSAPIError(f"Unexpected variable or unit for {name}")
+                units[name] = unit_label
+            values = variable.ValuesAsNumpy()
+            if not hasattr(values, "__len__") or len(values) != len(times):
+                raise ECMWF_IFSAPIError(f"Hourly array length mismatch for {name}")
+            data[name] = values
+        info = get_location_info(response)
+        if not all(math.isfinite(info[k]) for k in ("latitude", "longitude", "elevation")):
+            raise ECMWF_IFSAPIError("Invalid returned location metadata")
+        info.update({
+            "source": "Open-Meteo Historical Weather API", "endpoint": ARCHIVE_URL,
+            "model": IFS_MODEL, "response_model_id": int(response.Model()),
+            "requested_latitude": latitude, "requested_longitude": longitude,
+            "requested_elevation": elevation, "cell_selection": cell_selection,
+            "requested_timezone": timezone, "time_axis_timezone": "UTC",
+            "start_date": start_date, "end_date": end_date, "units": units,
+            "elevation_meaning": "effective elevation used for downscaling",
+            "retrieved_at_utc": datetime.now(utc_timezone.utc).isoformat(),
+            "derived_variables": {
+                "relative_humidity_2m": "derived from temperature and dew point",
+                "surface_pressure": "derived from MSL pressure, temperature and elevation",
+            },
+        })
+        dataframe = pd.DataFrame(data)
+        dataframe.attrs["weather_metadata"] = info
+    except ECMWF_IFSAPIError:
+        raise
+    except Exception as exc:
+        raise ECMWF_IFSAPIError(
+            f"ECMWF IFS request/response failed for {start_date}..{end_date} "
+            f"at ({latitude}, {longitude}): {exc}"
+        ) from exc
+    if print_info:
+        print(f"Coordinates: {info['latitude']}°, {info['longitude']}°")
+        print(f"Effective elevation: {info['elevation']} m asl")
+        print(f"Timezone: {info['timezone']} ({info['timezone_abbreviation']}); dates stored in UTC")
+    return dataframe, info
 
-    for i, var_name in enumerate(hourly_variables):
-        hourly_data[var_name] = hourly.Variables(i).ValuesAsNumpy()
 
-    dataframe = pd.DataFrame(data=hourly_data)
-
-    return dataframe, location_info
-
-
-# ============ DATACLASS DAN FUNGSI INTERPOLASI ============
-
-@dataclass(frozen=True)
-class ObservingLocation:
-    """Immutable record describing an observing site.
-
-    Parameters
-    ----------
-    name : str
-        A human-readable name for the location (e.g. city or observatory).
-    latitude : float
-        Geographic latitude in decimal degrees (positive for north, negative for south).
-    longitude : float
-        Geographic longitude in decimal degrees (positive for east, negative for west).
-    altitude : float
-        Altitude in metres above sea level.
-    timezone : str
-        IANA time zone identifier (e.g. ``"Asia/Jakarta"``).
-    """
-    name: str
-    latitude: float
-    longitude: float
-    altitude: float
-    timezone: str
+def fetch_hourly_weather(
+    latitude: float,
+    longitude: float,
+    start_date: str,
+    end_date: str,
+    hourly_variables: Optional[List[str]] = None,
+    timezone: str = "auto",
+    *,
+    elevation: Optional[float] = None,
+    cell_selection: str = "land",
+) -> pd.DataFrame:
+    """Fetch IFS hourly data; metadata is retained in DataFrame.attrs."""
+    dataframe, _ = fetch_weather_with_info(
+        latitude, longitude, start_date, end_date, hourly_variables, timezone,
+        elevation=elevation, cell_selection=cell_selection,
+    )
+    return dataframe
 
 
-class ECMWF_IFSAPIError(RuntimeError):
-    """Raised when the Open-Meteo ECMWF_IFS API returns an unexpected response."""
+@dataclass
+class AtmosphericWindow:
+    """Validated UTC hourly samples, with no endpoint extrapolation."""
+
+    hourly: pd.DataFrame
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    _indexed: pd.DataFrame = field(init=False, repr=False)
+
+    def __post_init__(self):
+        try:
+            self.hourly = self.hourly.copy()
+            self.hourly["date"] = pd.to_datetime(self.hourly["date"], utc=True)
+            self._indexed = self.hourly.set_index("date")
+            index = self._indexed.index
+            if (index.empty or index.hasnans or not index.is_unique
+                    or not index.is_monotonic_increasing
+                    or any(index[i] - index[i - 1] != pd.Timedelta(hours=1)
+                           for i in range(1, len(index)))):
+                raise ECMWF_IFSAPIError("Missing, duplicate, or non-hourly atmospheric timestamps")
+            for timestamp, row in self._indexed.iterrows():
+                validate_atmosphere(
+                    row["relative_humidity_2m"], row["temperature_2m"], row["surface_pressure"],
+                )
+                if "dew_point_2m" in row:
+                    dew = row["dew_point_2m"]
+                    if not math.isfinite(dew) or dew <= -273.15:
+                        raise ECMWF_IFSAPIError(f"Invalid dew point at {timestamp.isoformat()}")
+        except ECMWF_IFSAPIError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ECMWF_IFSAPIError(f"Malformed atmospheric series: {exc}") from exc
+
+    def at_time(self, target_utc: datetime) -> Tuple[float, float, float]:
+        """Return raw (RH %, T °C, P hPa) between the actual hourly anchors."""
+        target = pd.Timestamp(normalize_utc_datetime(target_utc))
+        index = self._indexed.index
+        if target < index[0] or target > index[-1]:
+            raise ECMWF_IFSAPIError(f"Time {target.isoformat()} lies outside the atmospheric window")
+        # pandas searchsorted can reject subsecond targets against an SDK
+        # datetime64[s] index. Scalar comparisons preserve the target precision.
+        right = bisect_left(index, target)
+        columns = ["relative_humidity_2m", "temperature_2m", "surface_pressure"]
+        if index[right] == target:
+            return tuple(float(v) for v in self._indexed.iloc[right][columns])
+        left = right - 1
+        fraction = (target - index[left]).total_seconds() / 3600.0
+        values0 = self._indexed.iloc[left][columns]
+        values1 = self._indexed.iloc[right][columns]
+        return tuple(float(a + fraction * (b - a)) for a, b in zip(values0, values1))
+
+    def to_record(self) -> Dict[str, Any]:
+        """JSON-safe provenance and raw hourly inputs, before bias correction."""
+        return {
+            **self.metadata,
+            "hourly_raw": [
+                {"date": timestamp.isoformat(), **{k: float(v) for k, v in row.items()}}
+                for timestamp, row in self._indexed.iterrows()
+            ],
+        }
+
+
+def fetch_atmospheric_window(
+    location: ObservingLocation, start_utc: datetime, end_utc: datetime,
+) -> AtmosphericWindow:
+    """Fetch one UTC date range containing all bounding hours of a window."""
+    start = normalize_utc_datetime(start_utc)
+    end = normalize_utc_datetime(end_utc)
+    if end < start:
+        raise ValueError("end_utc must not precede start_utc")
+    lower = start.replace(minute=0, second=0, microsecond=0)
+    upper = end.replace(minute=0, second=0, microsecond=0)
+    if upper < end:
+        upper += timedelta(hours=1)
+    dataframe, metadata = fetch_weather_with_info(
+        latitude=location.latitude, longitude=location.longitude,
+        elevation=location.altitude, start_date=lower.date().isoformat(),
+        end_date=upper.date().isoformat(), hourly_variables=list(ATMOSPHERIC_VARIABLES),
+        timezone="UTC", cell_selection="land",
+    )
+    selected = dataframe.loc[(dataframe["date"] >= lower) & (dataframe["date"] <= upper)]
+    expected = pd.date_range(lower, upper, freq="h")
+    if len(selected) != len(expected) or not pd.DatetimeIndex(selected["date"]).equals(expected):
+        raise ECMWF_IFSAPIError(f"Missing hourly samples for {lower.isoformat()}..{upper.isoformat()}")
+    return AtmosphericWindow(selected, {
+        **metadata, "window_start_utc": start.isoformat(), "window_end_utc": end.isoformat(),
+    })
+
+
+def get_rh_t_at_time(location: ObservingLocation, target_utc: datetime) -> Tuple[float, float, float]:
+    """Interpolate (RH %, T °C, P hPa); an exact hour needs just that sample."""
+    return fetch_atmospheric_window(location, target_utc, target_utc).at_time(target_utc)
 
 
 def interpolate_linear(x0: float, y0: float, x1: float, y1: float, x: float) -> float:
-    """Perform linear interpolation between two points.
-
-    Given two points (x0, y0) and (x1, y1), return the value at x.
-    If x is outside the interval [x0, x1], the function returns
-    y0 or y1 accordingly (no extrapolation beyond the endpoints).
-    """
+    """Legacy bounded scalar helper; atmospheric windows reject extrapolation."""
     if x <= x0:
         return y0
     if x >= x1:
         return y1
-    # Compute fractional distance
-    f = (x - x0) / (x1 - x0)
-    return y0 + f * (y1 - y0)
+    return y0 + ((x - x0) / (x1 - x0)) * (y1 - y0)
 
-
-def get_rh_t_at_time(location: ObservingLocation, target_utc: datetime) -> Tuple[float, float, float]:
-    """Compute relative humidity and temperature at an arbitrary UTC time.
-
-    This high-level function fetches hourly data for the UTC date(s)
-    bracketing the ``target_utc`` time, then interpolates the
-    ``relative_humidity_2m`` and ``temperature_2m`` values linearly between
-    the two surrounding hourly samples.
-
-    Parameters
-    ----------
-    location : ObservingLocation
-        The geographic point at which to sample the meteorological parameters.
-    target_utc : datetime
-        A timezone-aware UTC datetime representing the desired time
-        (e.g. sunset) at which RH and temperature are needed.
-
-    Returns
-    -------
-    (float, float)
-        A pair ``(RH_percent, temperature_celsius)`` giving the
-        interpolated relative humidity (0-100 percent) and air
-        temperature (degrees Celsius) at ``target_utc``.
-
-    Raises
-    ------
-    ECMWF_IFSAPIError
-        If the required hourly samples are missing or the API returns
-        invalid data.
-
-    Example
-    -------
-    >>> from datetime import datetime, timezone
-    >>> from open_meteo_api_ecmwf_ifs import ObservingLocation, get_rh_t_at_time
-    >>> semarang = ObservingLocation(
-    ...     name="Semarang Observatory",
-    ...     latitude=-6.97,
-    ...     longitude=110.42,
-    ...     altitude=3.0,
-    ...     timezone="Asia/Jakarta"
-    ... )
-    >>> sunset_utc = datetime(2025, 11, 1, 10, 30, tzinfo=timezone.utc)
-    >>> rh_percent, temp_c = get_rh_t_at_time(semarang, sunset_utc)
-    >>> print(f"Relative humidity: {rh_percent:.1f}%   Temperature: {temp_c:.1f}Â°C")
-    """
-    from datetime import timedelta
-    
-    if target_utc.tzinfo is None or target_utc.tzinfo.utcoffset(target_utc) is None:
-        raise ValueError("target_utc must be timezone-aware and in UTC")
-
-    # Determine the two bounding hours
-    t0 = target_utc.replace(minute=0, second=0, microsecond=0)
-    t1 = t0 + timedelta(hours=1)
-
-    # Prepare to fetch data for the day(s) needed
-    days_to_fetch = {t0.date(), t1.date()}
-    
-    # Fetch hourly data for all required days
-    all_data = []
-    for day in sorted(days_to_fetch):
-        date_str = day.strftime("%Y-%m-%d")
-        df = fetch_hourly_weather(
-            latitude=location.latitude,
-            longitude=location.longitude,
-            start_date=date_str,
-            end_date=date_str,
-            hourly_variables=["temperature_2m", "relative_humidity_2m", "surface_pressure"],
-            timezone="UTC"
-        )
-        all_data.append(df)
-    
-    # Combine all dataframes
-    df_combined = pd.concat(all_data, ignore_index=True)
-    
-    # Index rows by datetime for quick lookup
-    data_by_time: Dict[datetime, Dict[str, float]] = {}
-    for _, row in df_combined.iterrows():
-        dt = row['date'].to_pydatetime()
-        data_by_time[dt] = {
-            'temperature_2m': row['temperature_2m'],
-            'relative_humidity_2m': row['relative_humidity_2m'],
-            'surface_pressure': row['surface_pressure']
-        }
-    
-    # Retrieve the two samples
-    if t0 not in data_by_time or t1 not in data_by_time:
-        raise ECMWF_IFSAPIError(
-            f"Missing data for hours {t0.isoformat()} and/or {t1.isoformat()} in ECMWF_IFS response"
-        )
-    
-    row0 = data_by_time[t0]
-    row1 = data_by_time[t1]
-    
-    rh0 = row0.get('relative_humidity_2m')
-    rh1 = row1.get('relative_humidity_2m')
-    t2m0 = row0.get('temperature_2m')
-    t2m1 = row1.get('temperature_2m')
-    sp0 = row0.get('surface_pressure')
-    sp1 = row1.get('surface_pressure')
-    
-    if rh0 is None or rh1 is None or t2m0 is None or t2m1 is None or sp0 is None or sp1 is None:
-        raise ECMWF_IFSAPIError(
-            f"Missing RH/T2M/Pressure data for interpolation around {target_utc.isoformat()}"
-        )
-    
-    # Check for NaN values
-    if pd.isna(rh0) or pd.isna(rh1) or pd.isna(t2m0) or pd.isna(t2m1) or pd.isna(sp0) or pd.isna(sp1):
-        raise ECMWF_IFSAPIError(
-            f"NaN values in RH/T2M/Pressure data for interpolation around {target_utc.isoformat()}"
-        )
-
-    # Interpolate to target time (fraction within the hour)
-    seconds_since_t0 = (target_utc - t0).total_seconds()
-    # The duration between samples is exactly 3600 seconds
-    rh_interp = interpolate_linear(0.0, float(rh0), 3600.0, float(rh1), seconds_since_t0)
-    t_interp = interpolate_linear(0.0, float(t2m0), 3600.0, float(t2m1), seconds_since_t0)
-    sp_interp = interpolate_linear(0.0, float(sp0), 3600.0, float(sp1), seconds_since_t0)
-
-    # Clamp relative humidity to [0, 100] percent for safety
-    rh_interp = max(0.0, min(100.0, rh_interp))
-    return rh_interp, t_interp, sp_interp
-
-# ============ FUNGSI KOREKSI BIAS ============
 
 def apply_bias_correction(
-    rh: float,
-    temperature: float,
-    pressure: float,
-    bias_t: float = 0.0,
-    bias_rh: float = 0.0
-) -> tuple:
-    """Menerapkan koreksi bias pada data ECMWF_IFS.
+    rh: float, temperature: float, pressure: float,
+    bias_t: float = 0.0, bias_rh: float = 0.0,
+) -> Tuple[float, float, float]:
+    """Subtract explicit additive biases; clip corrected RH to [0, 100].
 
-    Menggunakan metode Additive Bias Correction (koreksi langsung):
-        X_corrected = X_ecmwf_ifs - bias
-    
-    di mana bias = ECMWF_IFS - Observasi (mean bias dari jurnal).
-    
-    Contoh:
-        - bias_t = -1 â†’ ECMWF_IFS lebih dingin 1Â°C â†’ T_corrected = T + 1
-        - bias_rh = 4  â†’ ECMWF_IFS lebih lembap 4% â†’ RH_corrected = RH - 4
-
-    Parameters
-    ----------
-    rh : float
-        Relative humidity dari ECMWF_IFS (persen, 0-100)
-    temperature : float
-        Suhu dari ECMWF_IFS (derajat Celsius)
-    pressure : float
-        Tekanan permukaan dari ECMWF_IFS (mbar) â€” tidak dikoreksi
-    bias_t : float
-        Bias suhu (Â°C), default 0.0 (tanpa koreksi)
-    bias_rh : float
-        Bias kelembapan relatif (%), default 0.0 (tanpa koreksi)
-
-    Returns
-    -------
-    (float, float, float)
-        Tuple (RH_corrected, T_corrected, pressure) di mana:
-        - RH_corrected di-clamp ke [0, 100]
-        - T_corrected = temperature - bias_t
-        - pressure tidak dikoreksi (pass-through)
+    Bias = model minus observation. Pressure is unchanged, in hPa (= mbar).
+    Only corrected RH is clipped; invalid raw atmospheric inputs are rejected.
     """
-    t_corrected = temperature - bias_t
-    rh_corrected = rh - bias_rh
-    
-    # Clamp RH ke [0, 100] persen
-    rh_corrected = max(0.0, min(100.0, rh_corrected))
-    
-    return rh_corrected, t_corrected, pressure
+    validate_atmosphere(rh, temperature, pressure)
+    if not math.isfinite(bias_t) or not math.isfinite(bias_rh):
+        raise ValueError("Atmospheric biases must be finite")
+    corrected = (max(0.0, min(100.0, rh - bias_rh)), temperature - bias_t, pressure)
+    validate_atmosphere(*corrected)
+    return corrected
 
 
 if __name__ == "__main__":
-    # Contoh penggunaan langsung saat file di-run
-    df = fetch_hourly_weather(
-        latitude=-6.9666,
-        longitude=110.45,
-        start_date="2025-11-01",
-        end_date="2025-11-01",
-        hourly_variables=["temperature_2m", "relative_humidity_2m", "surface_pressure"]
+    df, info = fetch_weather_with_info(
+        -6.9666, 110.45, "2024-04-09", "2024-04-09",
+        hourly_variables=list(ATMOSPHERIC_VARIABLES), timezone="UTC",
+        elevation=3.0, print_info=True,
     )
-    print("\nHourly data:\n", df)
-
-    # Atau gunakan fungsi dengan info lokasi
-    # df_weather, info = fetch_weather_with_info(
-    #     latitude=-6.9666,
-    #     longitude=110.45,
-    #     start_date="2025-11-01",
-    #     end_date="2025-11-01",
-    #     print_info=True
-    # )
-    # print("\nHourly data:\n", df_weather)
-	
-	
+    print(df)

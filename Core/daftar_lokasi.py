@@ -8,9 +8,8 @@
 # - Longitude positif = Timur, negatif = Barat
 # - Elevasi dalam meter di atas permukaan laut (mdpl)
 # - Sumber data: data_keterlihatan_hilal_core.xlsx (Sheet1), 82 lokasi unik
-# - adm4_code, bias_t, dan bias_rh tidak diisi pada data di bawah; 
-#   get_list_lokasi() memberi nilai default adm4_code="" dan 
-#   bias_t=0, bias_rh=0 (tidak dikoreksi)
+# - bias_t dan bias_rh tidak diisi pada data di bawah;
+#   get_list_lokasi() memberi nilai default bias_t=0, bias_rh=0
 # =============================================================================
 
 import io
@@ -111,12 +110,11 @@ def get_list_lokasi():
     Returns:
     --------
     list[dict]
-        List berisi dictionary dengan keys: nama, lat, lon, elevasi, adm4_code,
-        bias_t, bias_rh
+        List berisi dictionary dengan keys: nama, lat, lon, elevasi, bias_t, bias_rh
         Contoh:
         [
             {"nama": "UIN WS", "lat": -6.99, "lon": 110.34, "elevasi": 89,
-             "adm4_code": "33.74.10.1003", "bias_t": -1.0, "bias_rh": 2.0},
+             "bias_t": -1.0, "bias_rh": 2.0},
             ...
         ]
     """
@@ -125,42 +123,21 @@ def get_list_lokasi():
     
     list_lokasi = []
     for row in reader:
-        if len(row) >= 7:
-            # Format lengkap: nama, lat, lon, elevasi, adm4_code, bias_t, bias_rh
-            data = {
-                "nama": row[0].strip(),
-                "lat": float(row[1]),
-                "lon": float(row[2]),
-                "elevasi": float(row[3]),
-                "adm4_code": row[4].strip(),
-                "bias_t": float(row[5]),
-                "bias_rh": float(row[6])
-            }
-            list_lokasi.append(data)
-        elif len(row) >= 5:
-            # Backward compatibility: tanpa bias data
-            data = {
-                "nama": row[0].strip(),
-                "lat": float(row[1]),
-                "lon": float(row[2]),
-                "elevasi": float(row[3]),
-                "adm4_code": row[4].strip(),
-                "bias_t": 0.0,
-                "bias_rh": 0.0
-            }
-            list_lokasi.append(data)
-        elif len(row) >= 4:
-            # Backward compatibility: tanpa adm4_code dan bias
-            data = {
-                "nama": row[0].strip(),
-                "lat": float(row[1]),
-                "lon": float(row[2]),
-                "elevasi": float(row[3]),
-                "adm4_code": "",
-                "bias_t": 0.0,
-                "bias_rh": 0.0
-            }
-            list_lokasi.append(data)
+        if len(row) < 4:
+            continue
+        data = {
+            "nama": row[0].strip(),
+            "lat": float(row[1]),
+            "lon": float(row[2]),
+            "elevasi": float(row[3]),
+            "bias_t": 0.0,
+            "bias_rh": 0.0,
+        }
+        if len(row) >= 6:
+            # Dua kolom terakhir adalah bias suhu dan RH (opsional).
+            data["bias_t"] = float(row[-2])
+            data["bias_rh"] = float(row[-1])
+        list_lokasi.append(data)
     
     return list_lokasi
 
