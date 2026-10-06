@@ -77,6 +77,8 @@ def hitung_sky_brightness(
         - ``extinction_mag_v`` : total LOS extinction V [mag]
         - ``transmission_v`` : 10**(-0.4 * DM[2]), dimensionless
         - ``B`` : list sky brightness per band (picoergs)
+        - ``diagnostics`` : geometry/airmass, extinction components per band,
+          and night/twilight/daylight luminance components for V only
     """
     # ============================================================
     # KONSTANTA FOTOMETRI SCHAEFER/BOGAN
@@ -136,6 +138,7 @@ def hitung_sky_brightness(
     K: List[float] = [0.0] * 5
     DM: List[float] = [0.0] * 5
     B: List[float] = [0.0] * 5
+    components = []
 
     for i in range(5):
         # KR: Rayleigh extinction
@@ -156,6 +159,7 @@ def hitung_sky_brightness(
         # Total extinction & differential magnitude
         K[i] = KR + KA + KO + KW
         DM[i] = KR * XG + KA * XA + KO * XO + KW * XG
+        components.append({'k_R': KR, 'k_A': KA, 'k_O': KO, 'k_W': KW})
 
     # ============================================================
     # SKY BRIGHTNESS PER BAND
@@ -197,6 +201,12 @@ def hitung_sky_brightness(
         # Kombinasi: dark sky + min(twilight, daylight)
         # Moonlight TIDAK disertakan (Bulan = objek pengamatan)
         B[i] = (BN + min(BT, BD)) * 1.0e12
+        components[i].update({'T_sky': 10.0 ** (-0.4 * K[i] * X),
+                             'T_sun': C4})
+        if i == 2:  # The luminance conversion is defined for V only.
+            components[i].update({'B_night_nL': BN * 1.0e12 / 1.02e-3,
+                                  'B_twilight_nL': BT * 1.0e12 / 1.02e-3,
+                                  'B_daylight_nL': BD * 1.0e12 / 1.02e-3})
 
     # ============================================================
     # KONVERSI KE NANOLAMBERTS (band V, index 2)
@@ -212,6 +222,11 @@ def hitung_sky_brightness(
         "extinction_mag_v": dm_v,
         "transmission_v": transmission_from_extinction_mag(dm_v),
         "B": B,
+        "diagnostics": {
+            'Z': Z, 'Z_sun': ZS, 'separation_sky_deg': RS,
+            'X_G': XG, 'X_A': XA, 'X_O': XO, 'X_sky': X, 'X_sun': XS,
+            'bands': dict(zip(('U', 'B', 'V', 'R', 'I'), components)),
+        },
     }
 
 

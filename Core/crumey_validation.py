@@ -11,7 +11,8 @@ dalam paper, terorganisasi per section dan per persamaan.
 
 import math
 import sys
-sys.path.insert(0, '/home/claude')
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from full_rumus_crumey import *
 import full_rumus_crumey as cr
 
@@ -64,10 +65,11 @@ class TestRunner:
         print(f"\n  Total tes    : {self.total}")
         print(f"  Lolos (PASS) : {self.passed}  ✅")
         print(f"  Gagal (FAIL) : {self.failed}  {'❌' if self.failed else ''}")
-        print(f"  Akurasi      : {self.passed/self.total*100:.1f}%")
+        print(f"  Pemeriksaan lolos : {self.passed/self.total*100:.1f}%")
 
         if self.failed == 0:
-            print(f"\n  🎉 SEMUA {self.total} TES BERHASIL! Implementasi cocok dengan paper.")
+            print(f"\n  SEMUA {self.total} PEMERIKSAAN NUMERIK BERHASIL.")
+            print("  Ini pemeriksaan rumus/referensi, bukan validasi empiris hilal.")
         else:
             print(f"\n  ⚠️  {self.failed} tes gagal — periksa implementasi!")
 
@@ -82,6 +84,27 @@ class TestRunner:
 
 
 T = TestRunner()
+
+# Section 3's astronomical examples and linear approximations are scotopic.
+# Compare them to that explicit branch, not the default full-range combined fit.
+def naked_eye_limiting_mag(mu_sky, F=2.0):
+    return cr.naked_eye_limiting_mag(mu_sky, F=F, mode='scotopic')
+
+
+def naked_eye_surface_brightness_limit(mu_sky, F=2.0):
+    return cr.naked_eye_surface_brightness_limit(mu_sky, F=F, mode='scotopic')
+
+
+def ricco_radius_arcmin(B):
+    return cr.ricco_radius_arcmin(B, mode='scotopic')
+
+
+def telescopic_point_source_limit(*args, **kwargs):
+    return cr.telescopic_point_source_limit(*args, mode='scotopic', **kwargs)
+
+
+def telescopic_cutoff_mag(*args, **kwargs):
+    return cr.telescopic_cutoff_mag(*args, mode='scotopic', **kwargs)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 1.2: KONVERSI SATUAN BLACKWELL
@@ -652,4 +675,20 @@ for mu_test in [19.5, 20.0, 20.5, 21.0, 21.5, 22.0]:
 # RINGKASAN AKHIR
 # ═══════════════════════════════════════════════════════════════════════════
 
+print("\nKONTRAK COMBINED: FOTOMETRI DAN BACKGROUND FLOOR")
+for B in (0.0, 1e-7, 1e-5, 0.01, 1.0, 100.0):
+    A = arcmin2_to_sr(10.0)
+    increment = cr.increment_threshold(A, B, F=2.0)
+    if B <= cr.B_FLOOR:
+        T.check(f"Increment floor invariant B={B:g}", increment,
+                cr.increment_threshold(A, cr.B_FLOOR, F=2.0),
+                tol=1e-14, unit="cd/m²", eq_ref="documented increment-floor contract")
+    if B > 0:
+        target = cr.naked_eye_extended_target(10.0, cdm2_to_mag_arcsec2(B), F=2.0)
+        T.check(f"m-mu identity B={B:g}",
+                target['mu_lim'] - target['m_lim'],
+                2.5 * math.log10(3600 * 10.0), tol=1e-10,
+                unit="mag", eq_ref="photometric identity")
+
 T.print_summary()
+sys.exit(1 if T.failed else 0)

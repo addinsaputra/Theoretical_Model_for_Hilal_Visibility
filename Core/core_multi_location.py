@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
 ══════════════════════════════════════════════════════════════════════
-VALIDASI MODEL CRUMEY (2014) vs DATA OBSERVASI HILAL INDONESIA
+PERBANDINGAN MODEL VISUAL CRUMEY (2014) vs LABEL CITRA HILAL BMKG
 ══════════════════════════════════════════════════════════════════════
 
 Menjalankan model visibilitas hilal pada seluruh data observasi rukyatul
 hilal dari lokasi-lokasi BMKG Indonesia, lalu membandingkan hasil prediksi
-model (naked eye & teleskop) dengan data observasi aktual.
+model visual (naked eye & teleskop) dengan label deteksi kamera/CCD.
+Perbandingan lintas-metode ini deskriptif, bukan validasi ambang penglihatan
+manusia. Konfigurasi alat dan jam pengamatan aktual tidak tersedia.
 
 Fitur:
   1. Batch processing observasi di banyak lokasi sekaligus
@@ -55,6 +57,12 @@ from atmosfer_ecmwf_ifs import ARCHIVE_URL, IFS_MODEL, IFS_PRODUCT_NAME
 # --- Field factor referensi ---
 F_NAKED_REF = 1.8       # naked-eye reference
 FIELD_FACTOR_REF = 1.8   # telescope reference
+
+# Confirmed by the dataset owner: gallery results concern digital/CCD images.
+# These labels must not be used to fit a human-vision field factor.
+OBSERVATION_METHOD = 'ccd'
+OBSERVATION_SOURCE = 'https://hilal.bmkg.go.id/gallery'
+COMPARISON_SCOPE = 'cross_method_descriptive'
 
 # --- Parameter teleskop default BMKG ---
 TEL_PARAMS = dict(
@@ -1098,6 +1106,10 @@ def parse_obs(entry: tuple) -> dict:
         'bias_t': entry[8],
         'bias_rh': entry[9],
         'observed': entry[10],  # True = Y, False = N
+        'observation_method': OBSERVATION_METHOD,
+        'observation_source': OBSERVATION_SOURCE,
+        'actual_telescope_configuration_available': False,
+        'actual_observation_time_available': False,
     }
 
 
@@ -1182,6 +1194,9 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
             'lon': obs['lon'],
             'elv': obs['elv'],
             'observed': obs['observed'],
+            'observation_method': obs.get('observation_method', OBSERVATION_METHOD),
+            'observation_source': obs.get('observation_source', OBSERVATION_SOURCE),
+            'comparison_scope': COMPARISON_SCOPE,
             'success': True,
             'sumber_atmosfer': hasil.get('sumber_atmosfer', SUMBER_ATMOSFER),
             'bias_t': hasil.get('bias_t', obs.get('bias_t', 0.0)),
@@ -1281,17 +1296,17 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
             })
 
         # Ringkasan cepat
-        dm_ne = result['delta_m_ne_opt']
-        dm_tel = result['delta_m_tel_opt']
-        pred_ne = "Y" if dm_ne > 0 else "N"
-        pred_tel = "Y" if dm_tel > 0 else "N"
+        dm_ne = _comparison_margin(result, 'ne')
+        dm_tel = _comparison_margin(result)
+        pred_ne = _prediction(dm_ne) or '—'
+        pred_tel = _prediction(dm_tel) or '—'
         obs_str = "Y" if obs['observed'] else "N"
-        match_tel = "✓" if (dm_tel > 0) == obs['observed'] else "✗"
+        match_tel = ('✓' if pred_tel == obs_str else '✗') if dm_tel is not None else '—'
 
         if verbose:
             print(f"\n  RINGKASAN:")
-            print(f"    Naked Eye : Δm={dm_ne:+.3f}  Pred={pred_ne}")
-            print(f"    Teleskop  : Δm={dm_tel:+.3f}  Pred={pred_tel}  Obs={obs_str}  {match_tel}")
+            print(f"    Naked Eye : Δm={_display_margin(dm_ne)}  Pred={pred_ne}")
+            print(f"    Teleskop  : Δm={_display_margin(dm_tel)}  Pred={pred_tel}  Obs={obs_str}  {match_tel}")
 
         return result
 
@@ -1310,6 +1325,9 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
             'lon': obs['lon'],
             'elv': obs['elv'],
             'observed': obs['observed'],
+            'observation_method': obs.get('observation_method', OBSERVATION_METHOD),
+            'observation_source': obs.get('observation_source', OBSERVATION_SOURCE),
+            'comparison_scope': COMPARISON_SCOPE,
             'success': False,
             'sunset_local': None,
             'optimal_time_ne': None,
@@ -1325,7 +1343,8 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
 def run_batch(bias_mode: str = '2', manual_bias_t: float = 0.0, manual_bias_rh: float = 0.0) -> List[dict]:
     """Jalankan model untuk semua observasi."""
     print("\n" + "█" * 70)
-    print("  BATCH VALIDATION: Model Crumey (2014) vs Observasi Hilal")
+    print("  PERBANDINGAN DESKRIPTIF: Model visual Crumey vs label CCD BMKG")
+    print("  Label CCD tidak mengkalibrasi threshold penglihatan manusia.")
     n_tanggal = len({entry[1] for entry in OBSERVATIONS})
     print(f"  {N_OBS} data observasi pada {n_tanggal} tanggal pengamatan")
     print(f"  Mode: {CALC_MODE}  |  Atmosfer: {SUMBER_ATMOSFER}")
@@ -1396,33 +1415,85 @@ def print_results_table(results: List[dict]):
             continue
 
         obs_str = "Y" if r['observed'] else "N"
-        dm_ne = r.get('delta_m_ne_opt', -99)
-        dm_tel = r.get('delta_m_tel_opt', -99)
-        pred_ne = "Y" if dm_ne > 0 else "N"
-        pred_tel = "Y" if dm_tel > 0 else "N"
+        dm_ne = _comparison_margin(r, 'ne')
+        dm_tel = _comparison_margin(r)
+        pred_ne = _prediction(dm_ne) or '—'
+        pred_tel = _prediction(dm_tel) or '—'
         # Cocok jika prediksi teleskop sesuai observasi
-        match = "✓" if pred_tel == obs_str else "✗"
+        match = ('✓' if pred_tel == obs_str else '✗') if dm_tel is not None else '—'
         moon_alt = r.get('moon_alt_sunset', 0)
         elong = r.get('elongation', 0)
         moon_width_arcmin = r.get('moon_width', 0) * 60.0
 
         print(f"{r['no']:>3} {r['tanggal_obs']:>10} {r['nama']:<35} "
               f"{obs_str:>3} {moon_alt:>6.2f} {elong:>6.2f} {moon_width_arcmin:>6.2f} "
-              f"{dm_ne:>+8.3f} {pred_ne:>5} "
-              f"{dm_tel:>+8.3f} {pred_tel:>6} {match:>5}")
+              f"{_display_margin(dm_ne):>8} {pred_ne:>5} "
+              f"{_display_margin(dm_tel):>8} {pred_tel:>6} {match:>5}")
 
     print("─" * 120)
 
-    # Ringkasan kecocokan (observasi = data teleskop)
-    valid = [r for r in results if r.get('success', False)]
+    # Cross-method agreement only; digital detection is not visual detection.
+    valid = [r for r in results if _comparison_prediction(r) is not None]
     if valid:
-        n_match_tel = sum(1 for r in valid if (r.get('delta_m_tel_opt', -99) > 0) == r['observed'])
-        print(f"\n  Kecocokan Teleskop vs Observasi : {n_match_tel}/{len(valid)} ({n_match_tel/len(valid):.1%})")
+        n_match_tel = sum(1 for r in valid if _comparison_prediction(r) == ('Y' if r['observed'] else 'N'))
+        print(f"\n  Kesesuaian model visual vs label CCD (deskriptif): "
+              f"{n_match_tel}/{len(valid)} ({n_match_tel/len(valid):.1%})")
 
 
 # ═══════════════════════════════════════════════════════════════════
 # EXCEL OUTPUT
 # ═══════════════════════════════════════════════════════════════════
+
+def _display_margin(value):
+    return f'{value:+.3f}' if value is not None else '—'
+
+
+def _export_round(value, digits=4, scale=1.0):
+    """Missing numbers stay empty; infinite model margins stay explicit."""
+    if value is None:
+        return None
+    value = float(value) * scale
+    if math.isnan(value):
+        return None
+    if not math.isfinite(value):
+        return str(value)
+    return round(value, digits)
+
+
+def _export_scientific(value):
+    if value is None or math.isnan(float(value)):
+        return None
+    return f"{float(value):.4e}"
+
+
+def _export_duration(value):
+    if value is None or not math.isfinite(float(value)):
+        return None
+    return int(round(float(value)))
+
+
+def _prediction(value):
+    """None/NaN is unavailable, whereas a genuine -inf margin means N."""
+    if value is None or math.isnan(float(value)):
+        return None
+    return 'Y' if float(value) > 0 else 'N'
+
+
+def _comparison_margin(result, method='tel'):
+    if not result.get('success'):
+        return None
+    if CALC_MODE == 'optimal':
+        if not result.get('optimal_time_' + method):
+            return None
+        margin = result.get('delta_m_' + method + '_opt')
+    else:
+        margin = result.get('delta_m_' + method + '_sunset')
+    return margin if _prediction(margin) is not None else None
+
+
+def _comparison_prediction(result):
+    return _prediction(_comparison_margin(result))
+
 
 def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Tanpa koreksi (bias = 0)"):
     """Simpan semua hasil ke file Excel dengan format rapi 2-baris header."""
@@ -1666,15 +1737,18 @@ def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Tanp
 
     for i, r in enumerate(results, 3):
         obs_str = "Y" if r['observed'] else "N"
-        dm_ne_sun = r.get('delta_m_ne_sunset', -99)
-        dm_tel_sun = r.get('delta_m_tel_sunset', -99)
-        dm_ne_opt = r.get('delta_m_ne_opt', -99)
-        dm_tel_opt = r.get('delta_m_tel_opt', -99)
-        pred_ne_sun = "Y" if dm_ne_sun > 0 else "N"
-        pred_tel_sun = "Y" if dm_tel_sun > 0 else "N"
-        pred_ne_opt = "Y" if dm_ne_opt > 0 else "N"
-        pred_tel_opt = "Y" if dm_tel_opt > 0 else "N"
-        cocok = "\u2713" if pred_tel_opt == obs_str else "\u2717"
+        dm_ne_sun = r.get('delta_m_ne_sunset')
+        dm_tel_sun = r.get('delta_m_tel_sunset')
+        dm_ne_opt = r.get('delta_m_ne_opt')
+        dm_tel_opt = r.get('delta_m_tel_opt')
+        pred_ne_sun = _prediction(dm_ne_sun)
+        pred_tel_sun = _prediction(dm_tel_sun)
+        has_opt_ne = r.get('success') and bool(r.get('optimal_time_ne'))
+        has_opt_tel = r.get('success') and bool(r.get('optimal_time_tel'))
+        pred_ne_opt = _prediction(dm_ne_opt) if has_opt_ne else None
+        pred_tel_opt = _prediction(dm_tel_opt) if has_opt_tel else None
+        comparison = _comparison_prediction(r)
+        cocok = ("\u2713" if comparison == obs_str else "\u2717") if comparison is not None else None
 
         row_data = {
             # Metadata (A-H)
@@ -1688,44 +1762,44 @@ def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Tanp
             8: _tz_offset(r.get('lon', 0)),
             # Sunset (I-W)
             9: _parse_time(r.get('sunset_local', '')),
-            10: round(r.get('moon_alt_sunset', 0), 4),
-            11: round(r.get('sun_alt_sunset', 0), 4),
-            12: round(r.get('elongation', 0), 4),
-            13: round(r.get('moon_width', 0) * 60.0, 4),
-            14: round(r.get('phase_angle', 0), 4),
-            15: f"{r.get('sky_brightness_nl', 0):.4e}",
-            16: f"{r.get('luminansi_hilal_nl', 0):.4e}",
-            17: round(r.get('k_v', 0), 4),
-            18: round(r.get('rh', 0), 2),
-            19: round(r.get('temperature', 0), 2),
-            20: round(dm_ne_sun, 4),
+            10: _export_round(r.get('moon_alt_sunset'), 4),
+            11: _export_round(r.get('sun_alt_sunset'), 4),
+            12: _export_round(r.get('elongation'), 4),
+            13: _export_round(r.get('moon_width'), scale=60.0),
+            14: _export_round(r.get('phase_angle'), 4),
+            15: _export_scientific(r.get('sky_brightness_nl')),
+            16: _export_scientific(r.get('luminansi_hilal_nl')),
+            17: _export_round(r.get('k_v'), 4),
+            18: _export_round(r.get('rh'), 2),
+            19: _export_round(r.get('temperature'), 2),
+            20: _export_round(dm_ne_sun),
             21: pred_ne_sun,
-            22: round(dm_tel_sun, 4),
+            22: _export_round(dm_tel_sun),
             23: pred_tel_sun,
             # Optimal NE (X-AG)
             24: _parse_time(r.get('optimal_time_ne', '')),
-            25: round(r.get('optimal_moon_alt_ne', 0), 4),
-            26: round(r.get('opt_ne_elongation', 0), 4),
-            27: f"{r.get('opt_ne_sky_brightness_nl', 0):.4e}",
-            28: f"{r.get('opt_ne_luminansi_hilal_nl', 0):.4e}",
-            29: round(r.get('opt_ne_k_v', 0), 4),
-            30: round(r.get('opt_ne_rh', 0), 2),
-            31: round(r.get('opt_ne_temperature', 0), 2),
-            32: round(dm_ne_opt, 4),
+            25: _export_round(r.get('optimal_moon_alt_ne'), 4),
+            26: _export_round(r.get('opt_ne_elongation'), 4),
+            27: _export_scientific(r.get('opt_ne_sky_brightness_nl')),
+            28: _export_scientific(r.get('opt_ne_luminansi_hilal_nl')),
+            29: _export_round(r.get('opt_ne_k_v'), 4),
+            30: _export_round(r.get('opt_ne_rh'), 2),
+            31: _export_round(r.get('opt_ne_temperature'), 2),
+            32: _export_round(dm_ne_opt),
             33: pred_ne_opt,
             # Teleskop (AH-AV)
             34: _parse_time(r.get('optimal_time_tel', '')),
-            35: round(r.get('optimal_moon_alt_tel', 0), 4),
-            36: round(r.get('optimal_sun_alt_tel', 0), 4),
-            37: round(r.get('opt_tel_elongation', 0), 4),
-            38: f"{r.get('opt_tel_sky_brightness_nl', 0):.4e}",
-            39: f"{r.get('opt_tel_luminansi_hilal_nl', 0):.4e}",
-            40: round(r.get('opt_tel_k_v', 0), 4),
-            41: round(r.get('opt_tel_rh', 0), 2),
-            42: round(r.get('opt_tel_temperature', 0), 2),
-            43: round(r.get('telescope_gain_opt', 0), 4),
-            44: int(round(r.get('vis_duration_tel', 0))),
-            45: round(dm_tel_opt, 4),
+            35: _export_round(r.get('optimal_moon_alt_tel'), 4),
+            36: _export_round(r.get('optimal_sun_alt_tel'), 4),
+            37: _export_round(r.get('opt_tel_elongation'), 4),
+            38: _export_scientific(r.get('opt_tel_sky_brightness_nl')),
+            39: _export_scientific(r.get('opt_tel_luminansi_hilal_nl')),
+            40: _export_round(r.get('opt_tel_k_v'), 4),
+            41: _export_round(r.get('opt_tel_rh'), 2),
+            42: _export_round(r.get('opt_tel_temperature'), 2),
+            43: _export_round(r.get('telescope_gain_opt'), 4),
+            44: _export_duration(r.get('vis_duration_tel')),
+            45: _export_round(dm_tel_opt),
             46: pred_tel_opt,
             47: obs_str,
             48: cocok,
@@ -1737,6 +1811,13 @@ def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Tanp
             row_data[ci] = r.get(key) if r.get('success') else None
         for ci, (key, _) in enumerate(pressure_columns, 58):
             row_data[ci] = r.get(key) if r.get('success') else None
+
+        if not has_opt_ne:
+            for ci in (*range(24, 34), 51, 52, 56, 59):
+                row_data[ci] = None
+        if not has_opt_tel:
+            for ci in (*range(34, 47), 53, 54, 57, 60):
+                row_data[ci] = None
 
         if not r.get('success'):
             for ci in range(9, 47):
@@ -1767,7 +1848,10 @@ def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Tanp
 
             # Kolom Correct
             if ci == 48:
-                c.fill = green_fill if cocok == "\u2713" else red_fill
+                if row_data[48] == "\u2713":
+                    c.fill = green_fill
+                elif row_data[48] in ("\u2717", 'ERROR'):
+                    c.fill = red_fill
 
     # ── Column widths ──
     col_widths = {
@@ -1795,11 +1879,16 @@ def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Tanp
     ws2.column_dimensions['B'].width = 25
 
     valid = [r for r in results if r.get('success', False)]
-    n_match_tel = sum(1 for r in valid
-                      if (r.get('delta_m_tel_opt', -99) > 0) == r['observed'])
+    comparable = [r for r in valid if _comparison_prediction(r) is not None]
+    n_match_tel = sum(1 for r in comparable
+                      if _comparison_prediction(r) == ('Y' if r['observed'] else 'N'))
 
     summary_data = [
         ("KONFIGURASI", ""),
+        ("Metode Label Observasi", OBSERVATION_METHOD),
+        ("Sumber Label Observasi", OBSERVATION_SOURCE),
+        ("Cakupan Perbandingan", "Lintas-metode/deskriptif; bukan validasi visual"),
+        ("Metadata Alat/Jam Aktual", "Tidak tersedia; model memakai konfigurasi referensi"),
         ("Mode Perhitungan", CALC_MODE),
         ("Sumber Atmosfer", SUMBER_ATMOSFER),
         ("Produk IFS", IFS_PRODUCT_NAME if SUMBER_ATMOSFER == 'ecmwf_ifs' else 'N/A'),
@@ -1823,14 +1912,16 @@ def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Tanp
         ("HASIL VALIDASI", ""),
         ("Total Observasi", len(results)),
         ("Observasi Berhasil", len(valid)),
+        ("Teleskop Dapat Dibandingkan", len(comparable)),
+        ("Tanpa Hasil Perbandingan Teleskop", len(valid) - len(comparable)),
         ("Observasi Terlihat (Y)", sum(1 for r in results if r['observed'])),
         ("Observasi Tidak Terlihat (N)",
          sum(1 for r in results if not r['observed'])),
         ("", ""),
-        ("KECOCOKAN PREDIKSI TELESKOP vs OBSERVASI", ""),
+        ("KESESUAIAN MODEL VISUAL vs LABEL CCD (DESKRIPTIF)", ""),
         ("Kecocokan Teleskop",
-         f"{n_match_tel}/{len(valid)} ({n_match_tel/len(valid):.1%})"
-         if valid else "N/A"),
+         f"{n_match_tel}/{len(comparable)} ({n_match_tel/len(comparable):.1%})"
+         if comparable else "N/A"),
     ]
 
     for i, (label, val) in enumerate(summary_data, 1):
@@ -1904,6 +1995,8 @@ def save_to_csv(results: List[dict], filepath: str):
         'Phase_Angle_BT',
         'Status', 'Error',
         'P_Sunset', 'P_NE_Optimal', 'P_Tel_Optimal',
+        'Observation_Method', 'Observation_Source', 'Comparison_Scope',
+        'Actual_Telescope_Config_Available', 'Actual_Observation_Time_Available',
     ]
 
     out_dir = os.path.dirname(filepath)
@@ -1913,6 +2006,7 @@ def save_to_csv(results: List[dict], filepath: str):
     with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
         writer.writerow(headers)
+        column_positions = {name: index for index, name in enumerate(headers)}
 
         for r in results:
             # Parse Best_Time_Tel ke string HH:MM:SS
@@ -1928,16 +2022,16 @@ def save_to_csv(results: List[dict], filepath: str):
                     bt_str = ''
 
             dm_tel_bt = r.get('delta_m_tel_opt', -99)
-            prediksi = "Y" if dm_tel_bt > 0 else "N"
+            prediksi = _comparison_prediction(r)
             observasi = "Y" if r.get('observed', False) else "N"
 
             # Helper: format angka ke string (format standar internasional)
             def _f4(val):
-                return f"{float(val):.4f}" if r.get('success') else ''
+                return f"{float(val):.4f}" if r.get('success') and val is not None and not math.isnan(float(val)) else ''
             def _f2(val):
-                return f"{float(val):.2f}" if r.get('success') else ''
+                return f"{float(val):.2f}" if r.get('success') and val is not None and not math.isnan(float(val)) else ''
             def _full(val):
-                return f"{float(val)}" if r.get('success') and val is not None else ''
+                return f"{float(val)}" if r.get('success') and val is not None and not math.isnan(float(val)) else ''
 
             row = [
                 str(r.get('no', '')),
@@ -1950,7 +2044,7 @@ def save_to_csv(results: List[dict], filepath: str):
                 _f4(r.get('sun_alt_sunset', 0)),
                 _f4(r.get('moon_alt_sunset', 0)),
                 _f4(r.get('elongation', 0)),
-                _f4(r.get('moon_width', 0) * 60.0),
+                _f4(float(r['moon_width']) * 60.0 if r.get('moon_width') is not None else None),
                 _f4(r.get('phase_angle', 0)),
                 _full(r.get('sky_brightness_nl', 0)),
                 _full(r.get('luminansi_hilal_nl', 0)),
@@ -1969,7 +2063,7 @@ def save_to_csv(results: List[dict], filepath: str):
                 _f2(r.get('opt_tel_rh', 0)),
                 _f2(r.get('opt_tel_temperature', 0)),
                 _f4(r.get('telescope_gain_opt', 0)),
-                str(int(round(r.get('vis_duration_tel', 0)))) if r.get('success') else '',
+                _export_duration(r.get('vis_duration_tel')) if r.get('success') else None,
                 _f4(dm_tel_bt),
                 prediksi if r.get('success') else '',
                 observasi,
@@ -1992,8 +2086,23 @@ def save_to_csv(results: List[dict], filepath: str):
                 _full(r.get('pressure')),
                 _full(r.get('opt_ne_pressure')),
                 _full(r.get('opt_tel_pressure')),
+                r.get('observation_method', OBSERVATION_METHOD),
+                r.get('observation_source', OBSERVATION_SOURCE),
+                r.get('comparison_scope', COMPARISON_SCOPE),
+                False,
+                False,
             ]
 
+            if not r.get('optimal_time_ne'):
+                for name in ('kV_NE_Optimal', 'extinction_mag_v_NE_Optimal', 'transmission_v_NE_Optimal',
+                             'moon_semidiameter_deg_NE_Optimal', 'moon_distance_km_NE_Optimal', 'P_NE_Optimal'):
+                    row[column_positions[name]] = ''
+            if not r.get('optimal_time_tel'):
+                for name in ('sun_alt_BT', 'Moon_Alt_BT', 'Elongasi_BT', 'Sky_Bright_BT', 'Lum_Hilal_BT',
+                             'kV_BT', 'RH_BT', 'T_BT', 'Tel_Gain', 'Leg_Time_min', 'Dm_Tel_BT',
+                             'extinction_mag_v_BT', 'transmission_v_BT', 'moon_semidiameter_deg_BT',
+                             'moon_distance_km_BT', 'Phase_Angle_BT', 'P_Tel_Optimal'):
+                    row[column_positions[name]] = ''
             writer.writerow(row)
 
     _save_batch_atmosphere_provenance(results, filepath)

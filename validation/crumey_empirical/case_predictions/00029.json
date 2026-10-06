@@ -1,0 +1,20 @@
+{
+  "case": {
+    "observation_no": 29,
+    "date": "2022-06-29",
+    "location": "Bukit Persaudaraan Mauliru - Sumba Timur",
+    "latitude": -9.67563477316942,
+    "longitude": 120.295333443605,
+    "elevation_m": 68.0,
+    "hijri_month": 1,
+    "hijri_year": 1444,
+    "observed": false,
+    "label_method": "ccd",
+    "visual_attempt_verified": false,
+    "actual_attempt_window": null,
+    "actual_telescope": null
+  },
+  "status": "no_eligible_scene",
+  "error": "No scene above 2 deg",
+  "samples": []
+}

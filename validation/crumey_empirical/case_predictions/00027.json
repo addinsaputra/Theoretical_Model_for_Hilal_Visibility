@@ -1,0 +1,20 @@
+{
+  "case": {
+    "observation_no": 27,
+    "date": "2022-06-29",
+    "location": "Tower Hilal Sulamu - Kupang",
+    "latitude": -10.04515269471165,
+    "longitude": 123.6061277641333,
+    "elevation_m": 15.0,
+    "hijri_month": 1,
+    "hijri_year": 1444,
+    "observed": true,
+    "label_method": "ccd",
+    "visual_attempt_verified": false,
+    "actual_attempt_window": null,
+    "actual_telescope": null
+  },
+  "status": "no_eligible_scene",
+  "error": "No scene above 2 deg",
+  "samples": []
+}

@@ -5,10 +5,12 @@ ANALISIS DIAGNOSTIK MODEL CRUMEY (2014)
 Tahap 4.5: Analisis Sensitivitas dan Ketidakpastian
 ======================================================================
 Versi dimodifikasi untuk konsistensi dengan arsitektur Bab 4:
-  - F_NAKED = F_TEL = 2.0 (default Crumey, dikonfirmasi F-scan)
+  - F_NAKED = F_TEL = 2.0 (referensi sensitivitas, belum dikalibrasi visual)
   - TEL_AGE = 22.0 (konsisten dengan batch run)
   - sun_alt dari data CSV (bukan estimasi)
   - Input: data_hilal_era5.csv, data_hilal_merra2.csv
+Label CCD BMKG hanya mendukung perbandingan deskriptif lintas metode;
+label tersebut tidak mengkalibrasi threshold penglihatan manusia.
 
 CARA PAKAI:
   1. Letakkan di direktori Core/
@@ -37,8 +39,9 @@ from visual_limit_kastner import hitung_luminansi_intrinsik, terapkan_transmisi_
 from full_rumus_crumey import (
     nL_to_cdm2, cdm2_to_nL, arcmin2_to_sr,
     contrast_threshold, crescent_area_arcmin2,
-    visibility_margin_mag,
+    visibility_margin_mag, telescopic_extended_threshold,
 )
+from telescope_limit import TelescopeVisibilityModel
 from data_hisab import moon_semidiameter_time_local, set_location
 from core_crescent_visibility import tentukan_timezone_indonesia
 from pytz import timezone
@@ -64,33 +67,87 @@ TEL_NSURFACES = 6
 TEL_OBSTRUCTION = 0.0
 TEL_AGE = 22.0           # <-- FIX: konsisten dengan batch run
 
-# Field factors — F = 2.0 (default Crumey, dikonfirmasi F-scan §4.2)
-F_NAKED = 2.0            # <-- FIX: F optimal = default Crumey
-F_TEL = 2.0              # <-- FIX: F optimal = default Crumey
+# Reference factors for sensitivity calculations, not empirically calibrated
+# visual thresholds. BMKG gallery labels are CCD detections, not human vision.
+F_NAKED = 2.0
+F_TEL = 2.0
+
+PROVENANCE_COLUMNS = (
+    'Observation_Method', 'Observation_Source', 'Comparison_Scope',
+    'Actual_Telescope_Config_Available', 'Actual_Observation_Time_Available',
+)
+
+
+def _observation_provenance(row):
+    """Carry input metadata into derived sensitivity/report artifacts."""
+    result = {}
+    for column in PROVENANCE_COLUMNS:
+        default = 'unknown' if column in PROVENANCE_COLUMNS[:3] else None
+        value = row.get(column, default)
+        result[column] = default if pd.isna(value) else value
+    return result
 
 # ===================================================================
 # DATA LOADING
 # ===================================================================
 
 def load_observation_data(filepath: str) -> pd.DataFrame:
-    """Baca CSV ERA5/MERRA-2 dan kembalikan DataFrame standar."""
-    # Pertahankan nilai float geometri/transmisi yang diekspor dengan presisi penuh.
+    """Load usable model inputs, retain observation provenance and exclusions.
+
+    Missing method metadata stays unknown; model/label agreement remains a
+    descriptive comparison and cannot establish a visual detection threshold.
+    Failed atmosphere rows never reach ephemeris reconstruction or sensitivity.
+    """
     df_raw = pd.read_csv(filepath, float_precision='round_trip')
+    reasons = pd.Series('', index=df_raw.index, dtype='object')
 
-    df = pd.DataFrame()
-    df['No'] = df_raw['No']
-    df['Tanggal'] = df_raw['Tanggal']
-    df['Lokasi'] = df_raw['Lokasi']
-    df['Lat'] = df_raw['Lat']
-    df['Lon'] = df_raw['Lon']
-    df['Elv'] = df_raw['Elv']
-    df['Phase Angle (°)'] = df_raw.get('Phase_Angle_BT', df_raw['Phase_Angle'])
+    def exclude(mask, reason):
+        reasons.loc[mask & reasons.eq('')] = reason
+
+    if 'Status' in df_raw:
+        exclude(~df_raw['Status'].fillna('').astype(str).str.strip().str.lower().eq('valid'),
+                'status_invalid')
+    phase_column = 'Phase_Angle_BT' if 'Phase_Angle_BT' in df_raw else 'Phase_Angle'
+    numeric_inputs = (
+        'No', 'Lat', 'Lon', 'Elv', phase_column, 'sun_alt_BT', 'Moon_Alt_BT',
+        'Elongasi_BT', 'Sky_Bright_BT', 'Lum_Hilal_BT', 'kV_BT', 'RH_BT', 'T_BT',
+    )
+    for column in numeric_inputs:
+        if column not in df_raw:
+            raise ValueError(f'CSV diagnostic memerlukan kolom {column}.')
+        df_raw[column] = pd.to_numeric(df_raw[column], errors='coerce')
+        exclude(~np.isfinite(df_raw[column]), f'nonfinite_input:{column}')
+    for column, valid in (
+        ('No', (df_raw['No'] >= 0) & (df_raw['No'] % 1 == 0)),
+        ('Lat', df_raw['Lat'].between(-90, 90)),
+        ('Lon', df_raw['Lon'].between(-180, 180)),
+        (phase_column, df_raw[phase_column].between(0, 180)),
+        ('sun_alt_BT', df_raw['sun_alt_BT'].between(-90, 90)),
+        ('Moon_Alt_BT', (df_raw['Moon_Alt_BT'] > 0) & (df_raw['Moon_Alt_BT'] <= 90)),
+        ('Elongasi_BT', df_raw['Elongasi_BT'].between(0, 180)),
+        ('Sky_Bright_BT', df_raw['Sky_Bright_BT'] > 0),
+        ('Lum_Hilal_BT', df_raw['Lum_Hilal_BT'] >= 0),
+        ('RH_BT', (df_raw['RH_BT'] >= 0) & (df_raw['RH_BT'] < 100)),
+    ):
+        exclude(~valid, f'outside_domain:{column}')
+    exclude(pd.to_datetime(df_raw['Tanggal'], errors='coerce').isna(), 'invalid_date')
+    exclude(~df_raw['Observasi'].isin(('Y', 'N')), 'invalid_observation_label')
+    exclude(~df_raw['Prediksi'].isin(('Y', 'N')), 'missing_model_prediction')
+    if 'moon_semidiameter_deg_BT' in df_raw:
+        diameter = pd.to_numeric(df_raw['moon_semidiameter_deg_BT'], errors='coerce')
+        exclude(~np.isfinite(diameter) | (diameter <= 0), 'invalid_semidiameter')
+        df_raw['moon_semidiameter_deg_BT'] = diameter
+
+    exclusions = [{
+        'No': row['No'], 'Lokasi': row['Lokasi'], 'reason': reasons.at[index],
+    } for index, row in df_raw.loc[reasons.ne('')].iterrows()]
+    df_raw = df_raw.loc[reasons.eq('')].copy()
+    df = pd.DataFrame(index=df_raw.index)
+    for column in ('No', 'Tanggal', 'Lokasi', 'Lat', 'Lon', 'Elv'):
+        df[column] = df_raw[column]
+    df['Phase Angle (°)'] = df_raw[phase_column]
     df['Lebar Sabit (arcmin)'] = df_raw['W_arcmin']
-
-    # Sun altitude dari data Skyfield (bukan estimasi!)
     df['Sun Alt BT (°)'] = df_raw['sun_alt_BT']
-
-    # Best Time telescope data
     df['Moon Alt (°)'] = df_raw['Moon_Alt_BT']
     df['Elongasi (°)'] = df_raw['Elongasi_BT']
     df['Sky Bright (nL)'] = df_raw['Sky_Bright_BT']
@@ -100,8 +157,19 @@ def load_observation_data(filepath: str) -> pd.DataFrame:
     if 'moon_semidiameter_deg_BT' in df_raw:
         df['Moon Semidiameter (deg)'] = df_raw['moon_semidiameter_deg_BT']
     else:
-        # CSV lama: hitung sekali dari lokasi dan waktu BT, tanpa radius sudut asumsi.
-        df['Moon Semidiameter (deg)'] = df.apply(_observation_semidiameter_deg, axis=1)
+        # Legacy CSV: reconstruct each usable row, recording missing timestamps
+        # or invalid geometry without aborting the remaining observations.
+        semidiameters = {}
+        for index, row in df.iterrows():
+            try:
+                semidiameters[index] = _observation_semidiameter_deg(row)
+            except (ValueError, TypeError, KeyError) as error:
+                exclusions.append({'No': row['No'], 'Lokasi': row['Lokasi'],
+                                   'reason': f'geometry_reconstruction:{error}'})
+        keep = df.index.isin(semidiameters)
+        df = df.loc[keep].copy()
+        df_raw = df_raw.loc[df.index]
+        df['Moon Semidiameter (deg)'] = pd.Series(semidiameters, dtype='float64')
     for key in ('extinction_mag_v', 'transmission_v'):
         csv_key = f'{key}_BT'
         if csv_key in df_raw:
@@ -112,9 +180,21 @@ def load_observation_data(filepath: str) -> pd.DataFrame:
     df['Δm Tel Opt'] = df_raw['Dm_Tel_BT']
     df['Obs (Y/N)'] = df_raw['Observasi']
     df['Cocok?'] = (df_raw['Prediksi'] == df_raw['Observasi']).apply(
-        lambda x: '✓' if x else '✗')
-
-    return df
+        lambda match: '✓' if match else '✗')
+    for column in ('Observation_Method', 'Observation_Source', 'Comparison_Scope'):
+        if column in df_raw:
+            df[column] = df_raw[column].fillna('unknown').replace('', 'unknown')
+        else:
+            df[column] = 'unknown'
+    for column in ('Actual_Telescope_Config_Available', 'Actual_Observation_Time_Available'):
+        df[column] = df_raw[column] if column in df_raw else pd.NA
+    df.attrs['excluded_rows'] = exclusions
+    df.attrs['comparison_interpretation'] = 'descriptive_sensitivity_not_visual_validation'
+    if exclusions:
+        counts = pd.Series([item['reason'] for item in exclusions]).value_counts()
+        details = ', '.join(f'{reason}={count}' for reason, count in counts.items())
+        print(f'  Diagnostic: {len(exclusions)} baris dikeluarkan ({details}).')
+    return df.reset_index(drop=True)
 
 
 # ===================================================================
@@ -136,14 +216,17 @@ def estimate_azimuth_diff(elongation, sun_alt, moon_alt):
     return math.degrees(math.acos(cos_daz))
 
 
+def _telescope_factors():
+    return TelescopeVisibilityModel().calculate_factors(
+        D=TEL_APERTURE, Ds=TEL_OBSTRUCTION, M=TEL_MAG, age=TEL_AGE,
+        t1=TEL_TRANS, n=TEL_NSURFACES,
+    )
+
+
 def compute_telescope_Ba(B_sky_nL):
-    d_exit = TEL_APERTURE / TEL_MAG
-    De = 7.0 * math.exp(-0.5 * (TEL_AGE / 100.0) ** 2)
-    obs_frac = (TEL_OBSTRUCTION / TEL_APERTURE) ** 2 if TEL_OBSTRUCTION > 0 else 0
-    Ft = 1.0 / (TEL_TRANS ** TEL_NSURFACES * (1.0 - obs_frac))
-    delta_min = min(d_exit, De)
-    Ba_factor = (delta_min / De) ** 2 / Ft
-    return B_sky_nL * Ba_factor
+    if not math.isfinite(B_sky_nL) or B_sky_nL < 0:
+        raise ValueError("Background harus finite dan non-negatif.")
+    return B_sky_nL * _telescope_factors()['surface_brightness_factor']
 
 
 def _observation_semidiameter_deg(row):
@@ -167,10 +250,14 @@ def _observation_semidiameter_deg(row):
 
 def compute_delta_m(L_nL, B_nL, elongation_deg, mode='naked_eye', *, moon_sd_deg):
     """Margin dengan semidiameter pengamatan eksplisit [derajat]."""
+    if mode not in ('naked_eye', 'telescope'):
+        raise ValueError("mode harus naked_eye atau telescope.")
+    if not math.isfinite(L_nL) or L_nL < 0:
+        raise ValueError("Luminansi objek harus finite dan non-negatif.")
+    if not math.isfinite(B_nL) or B_nL <= 0:
+        raise ValueError("Background harus finite dan positif.")
     B_cd = nL_to_cdm2(B_nL)
     delta_B_obj_cd = nL_to_cdm2(L_nL)
-    if B_cd <= 0:
-        return {'delta_m': float('-inf'), 'C_obj': float('nan'), 'C_th': float('nan')}
 
     C_obj = delta_B_obj_cd / B_cd
     A_arcmin2 = crescent_area_arcmin2(elongation_deg, moon_sd_deg)
@@ -181,13 +268,13 @@ def compute_delta_m(L_nL, B_nL, elongation_deg, mode='naked_eye', *, moon_sd_deg
     if mode == 'naked_eye':
         C_th = contrast_threshold(A_sr, B_cd, F=F_NAKED, mode='auto')
     else:
-        B_tel_nL = compute_telescope_Ba(B_nL)
-        B_tel_cd = nL_to_cdm2(B_tel_nL)
-        if B_tel_cd <= 0:
-            B_tel_cd = 1e-10
-        A_eff = A_sr * (TEL_MAG ** 2)
-        phi = math.sqrt(2) * 1.0 * F_TEL
-        C_th = contrast_threshold(A_eff, B_tel_cd, F=phi, mode='auto')
+        factors = _telescope_factors()
+        threshold = telescopic_extended_threshold(
+            A_sr, B_cd, TEL_APERTURE / 1000, TEL_MAG,
+            p=factors['De'] / 1000, Ft=factors['Ft'], F=F_TEL,
+            dimming_factor=factors['surface_brightness_factor'],
+        )
+        C_th = threshold['C_th']
 
     delta_m = visibility_margin_mag(C_obj, C_th)
 
@@ -206,19 +293,28 @@ def compute_full_chain(row, rh_override):
     elv = row['Elv']
     moon_sd_deg = _observation_semidiameter_deg(row)
 
+    if not math.isfinite(moon_alt) or not 0 < moon_alt <= 90:
+        raise ValueError('Diagnostik memerlukan altitude bulan finite di atas horizon.')
+    if not math.isfinite(temperature) or not math.isfinite(elv):
+        raise ValueError('Suhu dan elevasi diagnostik harus finite.')
+    if not math.isfinite(lat) or not -90 <= lat <= 90:
+        raise ValueError('Lintang diagnostik harus finite di -90..90 derajat.')
+
     tgl = pd.to_datetime(row['Tanggal'])
     month = tgl.month
     year = tgl.year
 
     # Sun altitude dari data Skyfield (FIX: bukan estimasi lagi)
     sun_alt = row['Sun Alt BT (°)']
+    if not math.isfinite(sun_alt) or not -90 <= sun_alt <= 90:
+        raise ValueError('Altitude matahari harus finite di -90..90 derajat.')
     azisun = estimate_azimuth_diff(elongation, sun_alt, moon_alt)
 
     # RH = 100% berada di singularitas rumus aerosol Schaefer.
     # Lewati input ini secara eksplisit; jangan menggantinya dengan atmosfer asumsi.
-    rh_used = max(5.0, min(100.0, rh_override))
-    if rh_used >= 100.0:
-        raise ValueError("Diagnostik Schaefer memerlukan RH < 100%.")
+    if not math.isfinite(rh_override) or not 0 <= rh_override < 100:
+        raise ValueError("Diagnostik Schaefer memerlukan RH finite dalam 0 <= RH < 100%.")
+    rh_used = rh_override
 
     # Sky Brightness
     result_sky = hitung_sky_brightness(
@@ -226,7 +322,7 @@ def compute_full_chain(row, rh_override):
         altsun=sun_alt, azisun=azisun,
         humidity=rh_used, temperature=temperature,
         latitude=lat, elevation=elv,
-        alt_objek=max(moon_alt, 0.01),
+        alt_objek=moon_alt,
     )
     B_sky_nL = float(result_sky['sky_brightness'])
     k_v = float(result_sky['k_v'])
@@ -279,6 +375,7 @@ def categorize_fn(butuh_delta_rh):
 def analyze_rh_sensitivity(df):
     print("\n" + "=" * 70)
     print("4.5.1  SENSITIVITAS OAT Dm TERHADAP VARIASI RH")
+    print("Kecocokan label/FN/FP bersifat deskriptif lintas metode atau metode tidak diketahui.")
     print("=" * 70)
 
     all_rows = []
@@ -297,13 +394,14 @@ def analyze_rh_sensitivity(df):
 
         for delta_rh in RH_DELTAS:
             rh_test = rh_baseline + delta_rh
-            if rh_test < 5 or rh_test >= 100: continue
+            if rh_test < 0 or rh_test >= 100: continue
 
             result = compute_full_chain(row, rh_test)
             dm_at_deltas[delta_rh] = result['dm_tel']
             kv_at_deltas[delta_rh] = result['k_v']
 
             all_rows.append({
+                **_observation_provenance(row),
                 'No': obs_no, 'Lokasi': row['Lokasi'],
                 'Obs': obs_yn, 'Tipe': tipe,
                 'RH_baseline': rh_baseline, 'ΔRH': delta_rh,
@@ -335,6 +433,7 @@ def analyze_rh_sensitivity(df):
         kategori = categorize_fn(butuh_drh) if tipe == 'FN' else '-'
 
         critical_rows.append({
+            **_observation_provenance(row),
             'No': obs_no, 'Lokasi': row['Lokasi'],
             'Obs': obs_yn, 'Tipe': tipe,
             'RH_baseline': rh_baseline, 'k_V_baseline': kv_at_deltas.get(0, 0),
@@ -352,8 +451,9 @@ def analyze_rh_sensitivity(df):
 
     fn_rows = critical_df[critical_df['Tipe'] == 'FN']
     if len(fn_rows) > 0:
-        print("\n  KATEGORISASI FN:")
-        for cat_label, desc in [('A','near-miss ≤5pp'), ('B','correctable 5-20pp'), ('C','structural >20pp')]:
+        print("\n  KELOMPOK SENSITIVITAS FN LINTAS METODE (BUKAN DIAGNOSIS TERVALIDASI):")
+        for cat_label, desc in [('A','perubahan RH ≤5pp'), ('B','perubahan RH 5-20pp'),
+                                ('C','perubahan RH >20pp atau ambang tidak tercapai')]:
             n = sum(fn_rows['Kategori_FN'] == cat_label)
             print(f"    {cat_label} ({desc}): {n}/{len(fn_rows)}")
 
@@ -366,7 +466,7 @@ def analyze_rh_sensitivity(df):
 
 def analyze_error_decomposition(df):
     print("\n" + "=" * 70)
-    print("4.5.2  DEKOMPOSISI JALUR ERROR (KASTNER vs SCHAEFER)")
+    print("4.5.2  DEKOMPOSISI SENSITIVITAS (KASTNER vs SCHAEFER)")
     print("=" * 70)
 
     fn_fp = df[((df['Obs (Y/N)']=='Y')&(df['Cocok?']!='✓'))|
@@ -381,7 +481,7 @@ def analyze_error_decomposition(df):
         tipe = classify_obs_type(row['Obs (Y/N)'], row['Cocok?'])
 
         res_base = compute_full_chain(row, rh_base)
-        rh_low = max(rh_base - 20, 5.0)
+        rh_low = max(rh_base - 20, 0.0)
         res_low = compute_full_chain(row, rh_low)
 
         L_low_transmission = terapkan_transmisi_atmosfer(res_base['L_star_s10'], res_low['transmission_v'])
@@ -396,6 +496,7 @@ def analyze_error_decomposition(df):
         dm_int = dm_full - dm_L - dm_B
 
         decomp_rows.append({
+            **_observation_provenance(row),
             'No': obs_no, 'Lokasi': row['Lokasi'], 'Tipe': tipe,
             'RH_base': rh_base, 'RH_low': rh_low,
             'k_V_base': res_base['k_v'], 'k_V_low': res_low['k_v'],
@@ -444,6 +545,7 @@ def analyze_error_bars(sensitivity_df, critical_df):
             error_bar = (dm_low_val - dm_high_val) / 2.0
             covers = (min(dm_low_val, dm_high_val) <= 0 <= max(dm_low_val, dm_high_val))
             rows.append({
+                **_observation_provenance(cr),
                 'No': obs_no, 'Lokasi': cr['Lokasi'], 'Obs': cr['Obs'], 'Tipe': tipe,
                 'Δm_baseline': dm_base, 'σ_RH (±pp)': unc,
                 'Δm_low_RH': dm_low_val, 'Δm_high_RH': dm_high_val,
@@ -452,7 +554,7 @@ def analyze_error_bars(sensitivity_df, critical_df):
             })
 
     result = pd.DataFrame(rows)
-    print("\n  Fraksi FN konsisten:")
+    print("\n  Sensitivitas FN lintas metode: ambang model tercakup oleh variasi RH:")
     for unc in RH_UNC:
         fn_sub = result[(result['σ_RH (±pp)']==unc) & (result['Tipe']=='FN')]
         if len(fn_sub) > 0:
@@ -470,9 +572,12 @@ def analyze_era5_vs_merra2(df_era5, df_merra2):
     print("4.5.4  PERBANDINGAN ERA5 vs MERRA-2")
     print("=" * 70)
 
+    provenance_era5 = [column for column in PROVENANCE_COLUMNS if column in df_era5]
+    provenance_merra2 = [column for column in PROVENANCE_COLUMNS if column in df_merra2]
     merged = pd.merge(
-        df_era5[['No','Lokasi','Obs (Y/N)','Cocok?','RH (%)','k_V','T (°C)','Δm Tel Opt']],
-        df_merra2[['No','RH (%)','k_V','T (°C)','Δm Tel Opt','Cocok?']],
+        df_era5[['No','Lokasi','Obs (Y/N)','Cocok?','RH (%)','k_V','T (°C)','Δm Tel Opt',
+                 *provenance_era5]],
+        df_merra2[['No','RH (%)','k_V','T (°C)','Δm Tel Opt','Cocok?', *provenance_merra2]],
         on='No', suffixes=('_ERA5','_MERRA2'))
 
     merged['ΔRH'] = merged['RH (%)_MERRA2'] - merged['RH (%)_ERA5']
@@ -501,7 +606,9 @@ def analyze_era5_vs_merra2(df_era5, df_merra2):
         tp = sum((obs=='Y')&(cocok=='✓')); fn = sum((obs=='Y')&(cocok!='✓'))
         tn = sum((obs=='N')&(cocok=='✓')); fp = sum((obs=='N')&(cocok!='✓'))
         n = tp+fn+tn+fp
-        print(f"\n  {label}: TP={tp} FN={fn} FP={fp} TN={tn} Acc={(tp+tn)/n:.1%}")
+        agreement = f'{(tp+tn)/n:.1%}' if n else 'N/A'
+        print(f"\n  {label}: TP={tp} FN={fn} FP={fp} TN={tn}; "
+              f"kecocokan lintas metode={agreement} (deskriptif)")
 
     return merged
 
@@ -510,7 +617,7 @@ def analyze_era5_vs_merra2(df_era5, df_merra2):
 # OUTPUT: EXCEL + PLOTS
 # ===================================================================
 
-def save_results(sens_df, crit_df, decomp_df, eb_df, m2_df, filepath):
+def save_results(sens_df, crit_df, decomp_df, eb_df, m2_df, filepath, input_audit=None):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
@@ -535,7 +642,9 @@ def save_results(sens_df, crit_df, decomp_df, eb_df, m2_df, filepath):
         for ri, (_, row) in enumerate(df.iterrows(), 2):
             for ci, col in enumerate(df.columns, 1):
                 val = row[col]
-                if isinstance(val, float) and not math.isnan(val):
+                if pd.isna(val):
+                    val = None
+                elif isinstance(val, float):
                     if abs(val) > 1e6: val = f"{val:.4e}"
                     elif abs(val) < 0.001 and val != 0: val = f"{val:.6f}"
                     else: val = round(val, 4)
@@ -555,7 +664,8 @@ def save_results(sens_df, crit_df, decomp_df, eb_df, m2_df, filepath):
         base = od[od['ΔRH']==0]
         if len(base)==0: continue
         b = base.iloc[0]
-        p = {'No':obs_no, 'Lokasi':b['Lokasi'], 'Obs':b['Obs'], 'Tipe':b['Tipe'],
+        p = {**_observation_provenance(b),
+             'No':obs_no, 'Lokasi':b['Lokasi'], 'Obs':b['Obs'], 'Tipe':b['Tipe'],
              'RH_base':b['RH_baseline'], 'k_V_base':b['k_V'],
              'extinction_mag_v_base':b['extinction_mag_v'],
              'transmission_v_base':b['transmission_v']}
@@ -575,6 +685,22 @@ def save_results(sens_df, crit_df, decomp_df, eb_df, m2_df, filepath):
     if m2_df is not None and len(m2_df)>0: write_sheet(ws5, m2_df, "4.5.4 ERA5 vs MERRA2")
     else: ws5.title = "4.5.4 ERA5 vs MERRA2"
     ws6 = wb.create_sheet(); write_sheet(ws6, sens_df, "Data Detail")
+    ws7 = wb.create_sheet('Cakupan Perbandingan')
+    for label, value in (
+        ('Interpretasi', 'Sensitivitas dan kecocokan label lintas metode atau metode tidak diketahui'),
+        ('Validasi visual empiris', 'Tidak dilakukan oleh analisis diagnostik ini'),
+        ('F naked eye referensi', F_NAKED), ('F teleskop referensi', F_TEL),
+        ('Kategori FN', 'Kelompok perubahan RH; bukan diagnosis bias/struktur yang tervalidasi'),
+        ('Metode/sumber pengamatan', 'Dipertahankan dari input; metadata yang hilang tetap unknown'),
+    ):
+        ws7.append((label, value))
+    ws7.column_dimensions['A'].width = 30
+    ws7.column_dimensions['B'].width = 95
+    audit_rows = []
+    for source, audit in (input_audit or {}).items():
+        audit_rows.extend({'Input': source, **item} for item in audit.get('excluded_rows', []))
+    if audit_rows:
+        write_sheet(wb.create_sheet(), pd.DataFrame(audit_rows), 'Input Dikeluarkan')
 
     os.makedirs(os.path.dirname(filepath) or '.', exist_ok=True)
     wb.save(filepath)
@@ -614,7 +740,7 @@ def plot_sensitivity(sens_df, crit_df, filepath):
                         label=f'{t} (n={len(sub)})', edgecolors='black', linewidths=0.5)
     ax2.axhline(y=0, color='green', linewidth=2, linestyle='--', alpha=0.8)
     ax2.set_xlabel('k_V'); ax2.set_ylabel('Δm Tel (mag)')
-    ax2.set_title('k_V vs Δm'); ax2.legend(); ax2.grid(True, alpha=0.3)
+    ax2.set_title('k_V vs Δm; FN/FP lintas metode (deskriptif)'); ax2.legend(); ax2.grid(True, alpha=0.3)
 
     plt.tight_layout(); fig.savefig(filepath, dpi=150, bbox_inches='tight'); plt.close(fig)
     print(f"  Saved: {filepath}")
@@ -651,6 +777,7 @@ def plot_decomposition(decomp_df, filepath):
 def main():
     print("\n" + "#" * 70)
     print("  ANALISIS DIAGNOSTIK CRUMEY — Tahap 4.5")
+    print("  Sensitivitas/deskriptif lintas metode; tidak mengkalibrasi threshold visual.")
     print(f"  F_NAKED={F_NAKED}, F_TEL={F_TEL}, TEL_AGE={TEL_AGE}")
     print("#" * 70)
 
@@ -660,6 +787,9 @@ def main():
     print(f"\n  Membaca ERA5: {INPUT_ERA5}")
     df_era5 = load_observation_data(INPUT_ERA5)
     print(f"  {len(df_era5)} observasi")
+    if df_era5.empty:
+        print('  Tidak ada input fisik yang valid untuk analisis sensitivitas.')
+        return
 
     df_merra2 = None
     if os.path.exists(INPUT_MERRA2):
@@ -672,12 +802,15 @@ def main():
     eb_df = analyze_error_bars(sens_df, crit_df)
 
     m2_df = None
-    if df_merra2 is not None:
+    if df_merra2 is not None and not df_merra2.empty:
         m2_df = analyze_era5_vs_merra2(df_era5, df_merra2)
 
     # Simpan
     excel_path = os.path.join(OUTPUT_DIR, "Analisis_Diagnostik_Crumey.xlsx")
-    save_results(sens_df, crit_df, decomp_df, eb_df, m2_df, excel_path)
+    input_audit = {'ERA5': df_era5.attrs}
+    if df_merra2 is not None:
+        input_audit['MERRA2'] = df_merra2.attrs
+    save_results(sens_df, crit_df, decomp_df, eb_df, m2_df, excel_path, input_audit=input_audit)
 
     plot_sensitivity(sens_df, crit_df, os.path.join(OUTPUT_DIR, "Sensitivitas_RH_dan_kV.png"))
     plot_decomposition(decomp_df, os.path.join(OUTPUT_DIR, "Dekomposisi_Jalur_Error.png"))

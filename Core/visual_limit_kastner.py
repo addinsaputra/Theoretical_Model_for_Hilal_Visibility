@@ -4,34 +4,51 @@ Phase law lama dipertahankan. Schaefer menghitung seluruh ekstingsi atmosfer;
 modul ini hanya mengubah S10 ke nL dan menerapkan transmission_v sekali.
 """
 
+import math
+
 from crescent_geometry import crescent_area
+from full_rumus_crumey import cdm2_to_nL, mag_to_lux
 
-S10_TO_NL = 0.263
+# One S10 is the flux of a V=10 star distributed over one square degree.
+# Derive its luminance from the same V zero point as the threshold photometry,
+# instead of mixing rounded 0.263 nL and 2.51 with an exact magnitude scale.
+S10_TO_NL = cdm2_to_nL(mag_to_lux(10.0) / math.radians(1.0)**2)
 
 
-def hitung_luminansi_intrinsik(
+def hitung_fotometri_intrinsik(
     phase_angle_deg: float,
     elongation_deg: float,
     r_deg: float,
-) -> float:
-    """Mean extra-atmospheric crescent luminance L_star_s10 [S10].
+) -> dict:
+    """Photometry actually used by Kastner, including intermediate quantities.
 
     Sudut fase dipakai untuk magnitudo; elongasi untuk luas sabit [derajat²].
     """
+    if not math.isfinite(phase_angle_deg) or not 0.0 <= phase_angle_deg <= 180.0:
+        raise ValueError("Sudut fase harus finite dan berada dalam 0..180 derajat.")
     alpha = phase_angle_deg
     mv = 0.026 * alpha + 4e-9 * alpha**4 - 12.73
     D = crescent_area(elongation_deg, r_deg)
-    if D <= 0:
-        return 0.0
-    return (2.51 ** (10.0 - mv)) / D
+    L_star = (10.0 ** (0.4 * (10.0 - mv))) / D if D > 0 else 0.0
+    return {'M_v': mv, 'area_deg2': D, 'L_star_s10': L_star,
+            'S10_to_nL': S10_TO_NL, 'intrinsic_luminance_nL': S10_TO_NL * L_star}
+
+
+def hitung_luminansi_intrinsik(
+    phase_angle_deg: float, elongation_deg: float, r_deg: float,
+) -> float:
+    """Mean extra-atmospheric crescent luminance L_star_s10 [S10]."""
+    return hitung_fotometri_intrinsik(phase_angle_deg, elongation_deg, r_deg)['L_star_s10']
 
 
 def terapkan_transmisi_atmosfer(
     L_star_s10: float,
     transmission_v: float,
 ) -> float:
-    """Direct/excess luminance hilal [nL]: 0.263 * L_star_s10 * T_V."""
-    if not 0.0 <= transmission_v <= 1.0:
+    """Direct/excess luminance [nL] with the shared exact V zero point."""
+    if not math.isfinite(L_star_s10) or L_star_s10 < 0:
+        raise ValueError("Luminansi intrinsik harus finite dan non-negatif.")
+    if not math.isfinite(transmission_v) or not 0.0 <= transmission_v <= 1.0:
         raise ValueError("Transmisi atmosfer harus antara 0 dan 1.")
     return S10_TO_NL * L_star_s10 * transmission_v
 

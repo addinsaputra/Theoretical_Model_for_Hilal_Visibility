@@ -169,7 +169,7 @@ flowchart TB
     subgraph MODEL["MODEL VISIBILITAS"]
         D1["Schaefer: B_sky, k_v, A_V = DM_V, T_V"]
         D2["Kastner: L_star_s10 dari phase angle, elongasi, r"]
-        D3["L_obj = 0.263 L_star_s10 T_V; C_obj = L_obj/B_sky"]
+        D3["L_obj = S10_TO_NL L_star_s10 T_V; C_obj = L_obj/B_sky"]
         D4["Crumey: C_th; delta_m = 2.5 log10(C_obj/C_th)"]
     end
 
@@ -294,11 +294,11 @@ Excel menyimpan semidiameter sunset dan waktu optimal. CSV batch juga menyimpan 
 ### 8.3 Luminansi (nanoLambert)
 
 $$
-L^*_{S10} = \frac{2.51^{(10-m_v)}}{A},
-\qquad L_{obj,nL} = 0.263 L^*_{S10} T_V
+L^*_{S10} = \frac{10^{0.4(10-m_v)}}{A},
+\qquad L_{obj,nL} = S10\_TO\_NL\; L^*_{S10} T_V
 $$
 
-`hitung_luminansi_intrinsik(phase_angle_deg, elongation_deg, r_deg)` menghasilkan `L_star_s10` tanpa atmosfer. `terapkan_transmisi_atmosfer(L_star_s10, transmission_v)` menghasilkan direct/excess luminance hilal. Faktor `0.263` hanya mengonversi S10 ke nL. Kastner tidak menghitung airmass atau ekstingsi sendiri.
+`hitung_luminansi_intrinsik(phase_angle_deg, elongation_deg, r_deg)` menghasilkan `L_star_s10` tanpa atmosfer. `terapkan_transmisi_atmosfer(L_star_s10, transmission_v)` menghasilkan direct/excess luminance hilal. `S10_TO_NL = 0.26195630393381236` diturunkan dari flux bintang V=10 per deg² dengan zero point V bersama. Pembulatan lama `0.263`/`2.51` diganti agar luminansi × solid angle tepat mengembalikan flux phase law. Kastner tidak menghitung airmass atau ekstingsi sendiri.
 
 ---
 
@@ -312,6 +312,10 @@ $$
 Hilal menambahkan increment $\Delta B = L_{obj}$ ke background, sehingga total patch target adalah $B_t = B_{sky} + L_{obj}$. Semua jalur Crumey menerima **excess luminance**, bukan total patch target. Karena itu $L_{obj}=B_{sky}$ memberi $C_{obj}=1$, dan $L_{obj}=0.1B_{sky}$ memberi $C_{obj}=0.1$.
 
 Pada $C_{obj}=C_{th}$, margin nol. Status terlihat menggunakan perbandingan ketat `C_obj > C_th`. Jika luminansi objek nol atau luas sabit nol, margin adalah `-inf` dan objek tidak terlihat. Fallback `1 + C_obj` telah dihapus. Implementasi log memakai selisih logaritma yang setara untuk menghindari underflow pada rasio yang sangat kecil.
+
+Semua helper point source, extended source, magnitude, serta kalkulator memakai satu kontrak `increment_threshold(A_sr, B, F, mode)`. Output utamanya adalah ambang **increment luminansi** dalam cd/m²; `contrast_threshold` membaginya dengan background aktual. Default `mode='auto'` memakai kurva combined untuk gelap, mesopic, dan senja. Mode eksplisit scotopic dibatasi `B <= 0.03426 cd/m²`, photopic `B >= 3.4 cd/m²`; ini pemeriksaan domain bentuk sederhana, bukan bukti validitas hilal pada semua background.
+
+Untuk `B <= 1e-5 cd/m²`, increment dibekukan pada nilai kurva di floor untuk luas yang diberikan, sehingga tidak menuju nol ketika background menghilang. Pada teleskop luas tetap `M² A`. Kebijakan kontinu ini **merupakan ekstensi yang dinyatakan**, berbeda dari pembacaan literal contrast konstan pada Eq. 50 dan pendekatan luas beku `M0` pada Sec. 3.3 paper. Kebijakan ini belum divalidasi empiris untuk hilal. Konversi fotometri memakai zero point `Z_V = 2.54e-6 lux` yang sama, sehingga `mu_lim = m_lim + 2.5 log10(A_arcsec²)` berlaku hingga presisi floating point.
 
 | Nilai Dm | Status                   |
 | --------- | ------------------------ |
@@ -331,12 +335,14 @@ Program ini menggunakan model terintegrasi Schaefer-Crumey untuk menghitung visi
 | Central Obstruction   | Obstruksi pusat (untuk reflektor)             |
 | Transmission          | Transmisi per permukaan optik                 |
 | Contrast Threshold    | Ambang kontras berdasarkan model Crumey       |
-| Observer Age          | Usia pengamat (mempengaruhi ukuran pupil)     |
-| Seeing                | Ukuran seeing disk atmosfer (arcseconds)      |
+| Observer Age          | Estimator pupil fallback; sensitivitas usia belum dimodelkan |
+| Pupil Diameter        | Override diameter pupil aktual dalam mm      |
 
 Visibilitas teleskop dihitung berdasarkan **margin** antara Weber contrast objek dan contrast threshold Crumey:
 
 Faktor optik yang sama mengalikan luminansi excess hilal dan background: $L_{obj,eff}=fL_{obj}$ serta $B_{eff}=fB_{sky}$. Maka kontras tetap $L_{obj}/B_{sky}$. Background adaptasi dan luas tampak ($A_{eff}=M^2 A$) menentukan threshold teleskop yang baru.
+
+Dengan pupil mata terpusat, diameter dalam mm, dan transmisi total `tau = transmission**n_surfaces`, faktor ini adalah `f = tau * max(min(D/M,p)**2 - (Ds/M)**2, 0) / p**2`. Pemotongan pupil diterapkan sebelum menghitung area annular; bayangan sekunder dapat memblokir seluruh pupil. Backend `telescopic_extended_threshold` memakai faktor yang sama. Parameter optik diteruskan utuh ke sunset, scan waktu optimal, dan refinement, termasuk `transmission`, `n_surfaces`, `central_obstruction`, `observer_age`, `field_factor`, serta `pupil_diameter_mm`. Pupil fallback tidak memodelkan adaptasi senja, dan `FM=1` tetap asumsi optik/pengamat.
 
 $$
 \text{Margin} > 0 \Rightarrow \text{TERDETEKSI}
@@ -508,12 +514,20 @@ Sumbu X menunjukkan timestep (menit setelah sunset), sumbu Y menunjukkan visibil
 
 ### 13.3 Excel Output
 
-File Excel berisi 3 worksheet:
-- **Ringkasan**: Seluruh data summary (lokasi, waktu, atmosfer, posisi, visibilitas)
-- **Timestep Data**: Data per-timestep (jika mode optimal)
-- **Info Program**: Metadata program dan versi
+Excel **lokasi tunggal** berisi enam worksheet yang dapat dibaca:
+
+- **Ringkasan**: Keputusan, margin, kondisi evaluasi, window model, dan grafik margin pada mode optimal. Mata telanjang dan teleskop memiliki kolom terpisah, baik saat sunset maupun waktu optimal masing-masing.
+- **Input & Konfigurasi**: Lokasi, waktu, sumber atmosfer, bias, konfigurasi pencarian waktu, teleskop, pengamat, dan konstanta fotometri.
+- **Rantai Model**: Geometri → `M_v` dan `L*` → ekstingsi dan `L` → latar → optik → koefisien dan threshold Crumey → keputusan. Parameter, simbol, satuan, rumus, serta empat kolom hasil ditampilkan bersama.
+- **Atmosfer**: Snapshot sunset dan kedua optimum, airmass, komponen ekstingsi per band U/B/V/R/I, serta pembentukan latar band V.
+- **Timestep Data**: Tabel angka yang dapat difilter, dengan blok input bersama, mata telanjang, dan teleskop yang terpisah.
+- **Info Program**: Panduan membaca besaran, nilai kosong/nonfinite, metode, asumsi dan keterbatasan validasi.
+
+Parameter perantara direkam saat perhitungan pada `model_trace`; ekspor tidak mengambil ulang cuaca atau menjalankan ulang model. Angka finite tetap numerik dan hanya tampilannya yang dibulatkan. `D_luas` [deg²] di Kastner berbeda dari `D_ap` [mm] teleskop; `A_V = DM[2]` adalah ekstingsi total, sedangkan `Δm` adalah margin visibilitas. Waktu optimal mata telanjang dan teleskop dapat berbeda. Hasil teleskop yang dinonaktifkan dan optimum yang tidak tersedia dibiarkan kosong. Grafik menggunakan worksheet data tersembunyi pada mode optimal.
 
 Ringkasan, data timestep, dan ekspor multi-lokasi menyimpan `k_v`, `extinction_mag_v`, dan `transmission_v` secara terpisah untuk sunset serta waktu optimal. CSV batch mempertahankan `kV_Sunset`/`kV_BT` dan menambah `extinction_mag_v_Sunset`, `transmission_v_Sunset`, `extinction_mag_v_BT`, `transmission_v_BT`, serta pasangan waktu optimal naked eye. Transmisi disimpan dengan presisi penuh agar nilai kecil tetap terbaca. Margin nonfinite disimpan sebagai teks di Excel; grafik memakai nilai finite untuk menentukan sumbu.
+
+Ekspor batch Excel/CSV membiarkan kolom optimal kosong ketika tidak ada waktu optimal, termasuk altitude, atmosfer, margin, dan prediksinya. `None` tidak dibulatkan atau diganti angka nol. Observasi tanpa hasil teleskop yang dapat dibandingkan tidak masuk denominator kesesuaian deskriptif; jumlahnya ditampilkan pada ringkasan Excel. Margin `-inf` pada hasil evaluasi yang tersedia tetap berarti di bawah threshold, berbeda dari optimum yang tidak tersedia.
 
 ### 13.4 Pemeriksaan kontrak antar-model
 
@@ -545,7 +559,21 @@ Untuk fase, residu terhadap Q43 sekitar **19,51 arcsec**, sehingga belum memenuh
 
 API area Crumey sekarang menerima `elongation_deg`, menggantikan `phase_angle_deg`. Wrapper `hitung_luminansi_kastner` menggunakan keyword `phase_angle_deg`, `elongation_deg`, `r_deg`, dan `transmission_v`; argumen lama `z`/`k` dihapus. Wrapper Schaefer pada kalkulator mengembalikan `(sky_brightness_nl, k_v, extinction_mag_v, transmission_v)`.
 
-Validasi referensi bawaan terpisah dari tes antarmuka. Empat perbandingan Eq. 63 (aproksimasi radius Ricco) masih gagal; formulasi threshold tersebut berada di luar perubahan antarmuka ini.
+Pemeriksaan referensi rumus terpisah dari validasi empiris. Perbandingan Eq. 63 sekarang memakai cabang scotopic yang sesuai dengan aproksimasi paper, sedangkan tes tambahan memeriksa kontrak combined dan floor. Skrip mengembalikan exit code gagal jika ada pemeriksaan yang gagal. Kelulusan tes rumus dan antarmuka tidak membuktikan prediksi hilal sesuai penglihatan manusia.
+
+### 13.5 Observasi dan kelayakan kalibrasi Crumey
+
+Menurut konfirmasi pemilik data, 278 label pada `Core/core_multi_location.py` berasal dari kamera/CCD melalui teleskop di [galeri BMKG](https://hilal.bmkg.go.id/gallery). Dataset berisi 139 label positif dan 139 negatif pada 26 tanggal, tanpa konfigurasi teleskop atau waktu pengamatan aktual. Nilai `+1` pada workbook sumber merupakan offset hari, bukan jam pengamatan. Karena Crumey memodelkan penglihatan manusia, dataset ini menghasilkan **perbandingan deskriptif lintas metode**, bukan kalibrasi atau validasi empiris ambang visual. Faktor `F` produksi tidak disetel terhadap label CCD.
+
+`Core/crumey_empirical_validation.py` menyimpan input atmosfer IFS nyata, provenance, konfigurasi referensi 100 mm/50×, prediksi per kasus, serta sensitivitas fraksi luas 1, 0.5, 0.25, dan 0.1 dengan luminansi excess tetap. Fraksi luas adalah skenario sensitivitas, bukan hasil kalibrasi bentuk hilal. Kalibrasi visual hanya menerima label boolean dari percobaan visual yang terverifikasi, rentang waktu aktual, serta konfigurasi optik aktual untuk pengamatan teleskop. Evaluasi menahan seluruh campaign/lunasi di luar training bila tersedia, dengan fallback per tanggal, untuk mencegah kebocoran antar lokasi atau hari dalam campaign yang sama.
+
+```bash
+python -X utf8 Core/crumey_empirical_validation.py --replay validation/crumey_empirical/raw_inputs.json --workers 4
+```
+
+Lihat [laporan perbaikan](docs/CRUMEY_IMPLEMENTATION_AND_VALIDATION.md) dan [laporan perbandingan observasi](validation/crumey_empirical/report.md) untuk hasil serta batas interpretasi.
+
+[Telaah kelemahan khusus hilal](docs/CRUMEY_HILAL_LIMITATIONS.md) merinci batas morfologi, phase law/jarak sumber, warna langit senja, adaptasi/pupil, resolusi/FOV, faktor pengamat, dan extrapolasi domain data. Konsistensi numerik dipisahkan dari validitas fisik asumsi sumber dan validasi penglihatan manusia.
 
 Pada checkout ini, dispatcher atmosfer mendukung `ecmwf_ifs`, `merra2`, dan `manual`. Skrip batch memakai `SUMBER_ATMOSFER = "ecmwf_ifs"`; modul ERA5 tidak ada dalam checkout. Pengujian integrasi memakai atmosfer manual dan ephemeris DE440 lokal.
 

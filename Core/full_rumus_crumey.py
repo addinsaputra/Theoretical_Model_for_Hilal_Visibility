@@ -28,6 +28,8 @@ from crescent_geometry import crescent_area
 
 # --- Zero-point fotometri ---
 Z_V = 2.54e-6  # V-band illuminance zero-point [lux] (Cox 1999, di bawah eq. 4)
+_ARCSEC2_TO_SR = (math.pi / (180.0 * 3600.0)) ** 2
+_MU_ZERO_POINT = -2.5 * math.log10(_ARCSEC2_TO_SR / Z_V)
 
 # --- S/P ratio referensi ---
 RHO_BLACKWELL = 1.408   # S/P ratio lampu 2850K milik Blackwell (di bawah eq. 7)
@@ -68,6 +70,42 @@ _ZETA = 1.150e-9   # [lux] — threshold illuminance point-source pada B=0
 
 # --- Batas luminansi background efektif nol ---
 B_FLOOR = 1e-5  # [cd/m²] ≈ 25 mag/arcsec²
+
+# Conservative domains for the simplified single-regime threshold forms.
+# Combined is used for the intervening mesopic range and by default everywhere.
+SCOTOPIC_MAX_B = 3.426e-2  # 10^-2 footLambert
+PHOTOPIC_MIN_B = 3.40
+
+
+def _finite_value(name: str, value: float) -> float:
+    """Reject missing, nonnumeric, NaN and infinite physical inputs."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} harus berupa bilangan finite.") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"{name} harus finite.")
+    return result
+
+
+def _positive_value(name: str, value: float) -> float:
+    result = _finite_value(name, value)
+    if result <= 0:
+        raise ValueError(f"{name} harus > 0.")
+    return result
+
+
+def _nonnegative_value(name: str, value: float) -> float:
+    result = _finite_value(name, value)
+    if result < 0:
+        raise ValueError(f"{name} harus >= 0.")
+    return result
+
+
+def _validate_mode(mode: str) -> str:
+    if mode not in ('auto', 'combined', 'scotopic', 'photopic'):
+        raise ValueError(f"Mode threshold tidak dikenal: {mode!r}.")
+    return 'combined' if mode == 'auto' else mode
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -117,32 +155,46 @@ def mag_to_lux(m_V: float) -> float:
     Dari definisi: m_V = -2.5 log(I/Z_V), atau I = Z_V × 10^(-0.4 m_V).
     Lihat persamaan di bawah eq. 4: m_V = -2.5 log J - 13.99.
     """
-    return Z_V * 10.0 ** (-0.4 * m_V)
+    m_V = _finite_value('m_V', m_V)
+    try:
+        result = Z_V * 10.0 ** (-0.4 * m_V)
+    except OverflowError as exc:
+        raise ValueError("m_V berada di luar rentang numerik fotometri.") from exc
+    return _positive_value('illuminance hasil konversi', result)
 
 
 def lux_to_mag(I_lux: float) -> float:
     """Illuminance [lux] → V-magnitude.
-    m_V = -2.5 log(J) - 13.99  (di bawah eq. 4)
+    m_V = -2.5 log(J/Z_V); -13.99 dalam paper adalah pembulatan.
     """
-    if I_lux <= 0:
+    I_lux = _nonnegative_value('I_lux', I_lux)
+    if I_lux == 0:
         return float('inf')
-    return -2.5 * math.log10(I_lux) - 13.99
+    return -2.5 * (math.log10(I_lux) - math.log10(Z_V))
 
 
 def cdm2_to_mag_arcsec2(B: float) -> float:
     """Luminance [cd/m²] → surface brightness [mag/arcsec²].
-    μ_V = -2.5 log(B) + 12.58  (di bawah eq. 4)
+    μ_V = -2.5 log(B × sr_per_arcsec² / Z_V).
+    Ini memakai zero point yang sama dengan magnitude terintegrasi;
+    12.58 dalam paper adalah pembulatan.
     """
-    if B <= 0:
+    B = _nonnegative_value('B', B)
+    if B == 0:
         return float('inf')
-    return -2.5 * math.log10(B) + 12.58
+    return -2.5 * math.log10(B) + _MU_ZERO_POINT
 
 
 def mag_arcsec2_to_cdm2(mu: float) -> float:
     """Surface brightness [mag/arcsec²] → luminance [cd/m²].
-    B = 10^((12.58 - μ) / 2.5)
+    B = 10^((μ_zero - μ) / 2.5), dengan zero point dari Z_V.
     """
-    return 10.0 ** ((12.58 - mu) / 2.5)
+    mu = _finite_value('mu', mu)
+    try:
+        result = 10.0 ** ((_MU_ZERO_POINT - mu) / 2.5)
+    except OverflowError as exc:
+        raise ValueError("mu berada di luar rentang numerik fotometri.") from exc
+    return _positive_value('luminance hasil konversi', result)
 
 
 def deg2_to_arcmin2(area_deg2: float) -> float:
@@ -196,8 +248,8 @@ def color_correction_mag(color_index: float, lab_temp: float = 2850) -> float:
     Kasus khusus (Eq. 16): m* − m_2850 = 0.72 − 0.27(B−V)
     Kasus khusus (Eq. 17): m* − m_2360 = 0.94 − 0.27(B−V)
 
-    Return: koreksi (positif = bintang terlihat lebih redup secara scotopic
-                      dibanding sumber lab pada luminansi photopic yang sama)
+    Return: koreksi magnitude limit (positif = bintang dengan S/P lebih besar
+                      bisa terdeteksi pada magnitude V yang lebih redup)
     """
     rho_T = sp_ratio_temperature(lab_temp)
     rho_c = sp_ratio_color_index(color_index)
@@ -222,6 +274,7 @@ def R_scotopic(B: float) -> float:
     R = (r₁·B⁻¹/⁴ + r₂)²
     Valid untuk B ≲ 7×10⁻² cd/m² (sekitar 15.5 mag/arcsec²).
     """
+    B = _positive_value('B', B)
     return (_r1 * B ** (-0.25) + _r2) ** 2
 
 
@@ -230,6 +283,7 @@ def R_photopic(B: float) -> float:
     R = (r₃·B⁻¹/⁴ + r₄)²
     Valid untuk B ≳ 7×10⁻² cd/m².
     """
+    B = _positive_value('B', B)
     return (_r3 * B ** (-0.25) + _r4) ** 2
 
 
@@ -238,6 +292,7 @@ def R_combined(B: float) -> float:
     R = (√(a₁B⁻¹/² + a₂B⁻¹/⁴ + a₃) + a₄B⁻¹/⁴ + a₅)²
     Menangani transisi scotopic-photopic secara smooth.
     """
+    B = _positive_value('B', B)
     inner_sq = _a1 * B ** (-0.5) + _a2 * B ** (-0.25) + _a3
     inner = math.sqrt(max(inner_sq, 0.0))
     return (inner + _a4 * B ** (-0.25) + _a5) ** 2
@@ -249,6 +304,7 @@ def Cinf_scotopic(B: float) -> float:
     """C∞ scotopic sederhana. Eq. 35 + Eq. 37.
     C∞ = k₁·B⁻¹/⁴ + k₂
     """
+    B = _positive_value('B', B)
     return _k1 * B ** (-0.25) + _k2
 
 
@@ -256,6 +312,7 @@ def Cinf_photopic(B: float) -> float:
     """C∞ photopic = konstan (Weber's law). Eq. 36 + Eq. 38.
     C∞ = k₄ = 2.720×10⁻³
     """
+    _positive_value('B', B)
     return _k4
 
 
@@ -263,6 +320,7 @@ def Cinf_combined(B: float) -> float:
     """C∞ combined (full-range hyperbola). Eq. 39 + Eq. 40.
     C∞ = √(b₁B⁻¹/² + b₂B⁻¹/⁴ + b₃) + b₄B⁻¹/⁴ + b₅
     """
+    B = _positive_value('B', B)
     inner_sq = _b1 * B ** (-0.5) + _b2 * B ** (-0.25) + _b3
     inner = math.sqrt(max(inner_sq, 0.0))
     return inner + _b4 * B ** (-0.25) + _b5
@@ -278,9 +336,10 @@ def q_parameter(B: float) -> float:
 
     Catatan: untuk astronomi malam, q selalu = 0.6 (= 3/5).
     """
+    B = _positive_value('B', B)
     logB = math.log10(B)
     if B >= 3.40:
-        return 1.146 - 0.0885 * logB
+        return _positive_value('q(B)', 1.146 - 0.0885 * logB)
     elif B >= 0.193:
         return 0.8861 + 0.4 * logB
     else:
@@ -297,75 +356,83 @@ crumey_q = q_parameter
 # BAGIAN 5: FUNGSI THRESHOLD UTAMA
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _threshold_components(B: float, mode: str = 'auto') -> Tuple[float, float, float, float]:
+    """One coefficient selection for increment, point and extended limits.
+
+    The floor uses the same branch coefficients evaluated exactly at B_FLOOR,
+    rather than the rounded Xi constants, so the increment remains continuous.
+    Raw R/Cinf functions are analytic formulas; the threshold contract restricts
+    the simplified branches to conservative single-regime domains.
+    """
+    B = _nonnegative_value('B', B)
+    mode = _validate_mode(mode)
+    if mode == 'scotopic' and B > SCOTOPIC_MAX_B:
+        raise ValueError(f"mode='scotopic' memerlukan B <= {SCOTOPIC_MAX_B}; gunakan combined.")
+    if mode == 'photopic' and B < PHOTOPIC_MIN_B:
+        raise ValueError(f"mode='photopic' memerlukan B >= {PHOTOPIC_MIN_B}; gunakan combined.")
+    B_eff = max(B, B_FLOOR)
+    if mode == 'scotopic':
+        R, Cinf, q = R_scotopic(B_eff), Cinf_scotopic(B_eff), 0.6
+    elif mode == 'photopic':
+        R, Cinf, q = R_photopic(B_eff), Cinf_photopic(B_eff), q_parameter(B_eff)
+    else:
+        R, Cinf, q = R_combined(B_eff), Cinf_combined(B_eff), q_parameter(B_eff)
+    return B_eff, _positive_value('R(B)', R), _positive_value('Cinf(B)', Cinf), _positive_value('q(B)', q)
+
+
+def threshold_parameters(B: float, mode: str = 'auto') -> dict:
+    """Expose the coefficients used by the threshold contract for audit/export.
+
+    This selects the same branch and floor as increment_threshold. The regime
+    label is diagnostic only; auto always uses the combined curve.
+    """
+    B_eval, R, Cinf, q = _threshold_components(B, mode)
+    B = float(B)
+    return {'B_actual': B, 'B_eval': B_eval, 'R': R, 'C_inf': Cinf,
+            'q': q, 'ricco_area_sr': R / Cinf, 'floor_applied': B <= B_FLOOR,
+            'curve': 'combined' if mode in ('auto', 'combined') else mode}
+
+
+def increment_threshold(A_sr: float, B: float, F: float = 1.0,
+                        mode: str = 'auto') -> float:
+    """Threshold excess luminance ΔB [cd/m²], with actual background B >= 0.
+
+    Above B_FLOOR this is Eq. 41: ΔB = F B ((R/A)^q + Cinf^q)^(1/q).
+    At and below B_FLOOR the *increment*, not its ratio to actual B, is fixed
+    at the value at the floor for the supplied area. This is an explicit
+    continuous extension motivated by Eqs. 45–46; it does not literally
+    reproduce constant contrast in Eq. 50 nor claim a fit to zero-background
+    observations. In particular, ΔB is nonzero even when B is zero.
+
+    auto/combined use the achromatic combined fit. scotopic requires
+    B <= 0.03426, photopic B >= 3.4 cd/m²; the joining q must remain positive.
+    These domain checks do not validate colour, adaptation or crescent shape.
+    """
+    A_sr = _positive_value('A_sr', A_sr)
+    F = _positive_value('F', F)
+    B_eff, R, Cinf, q = _threshold_components(B, mode)
+    # Stable geometric combination, including very small target areas.
+    x = q * (math.log(R) - math.log(A_sr))
+    y = q * math.log(Cinf)
+    largest = max(x, y)
+    log_C = (largest + math.log1p(math.exp(min(x, y) - largest))) / q
+    try:
+        result = math.exp(math.log(F) + math.log(B_eff) + log_C)
+    except OverflowError as exc:
+        raise ValueError("Threshold berada di luar rentang numerik.") from exc
+    return _positive_value('delta_B_threshold', result)
+
+
 def contrast_threshold(A_sr: float, B: float, F: float = 1.0,
                        mode: str = 'auto') -> float:
-    """Hitung kontras threshold C(A, B) sesuai model Crumey.
+    """Threshold contrast ΔB_th/B using the *actual*, strictly positive B.
 
-    Ini adalah persamaan utama model: Eq. 41 (general) dan Eq. 47 (scotopic).
-    C = F × ((R/A)^q + C∞^q)^(1/q)
-
-    Parameters
-    ----------
-    A_sr : float
-        Luas angular target [steradian]. Harus > 0.
-    B : float
-        Luminansi background [cd/m²]. Harus > 0.
-    F : float
-        Overall field factor (default 1.0 = kondisi lab ideal).
-        Untuk pengamatan nyata, paper menyarankan F ≈ 2 (Sec. 3.1).
-        F mencakup: laboratory scaling, personal factor, age factor, dll.
-    mode : str
-        'scotopic'  : bentuk sederhana (Eq. 47) — R_scotopic + Cinf_scotopic
-                      + q=0.6. PERHATIAN: R_scotopic/Cinf_scotopic hanya akurat
-                      untuk B ≲ 0.05 cd/m²; di atasnya divergen dari combined.
-        'photopic'  : gunakan bentuk photopic
-        'combined'  : bentuk combined (Eq. 41) — R_combined + Cinf_combined
-                      + q(B). Valid di semua level luminansi, termasuk scotopic
-                      (karena q(B<0.193)=0.6 dan hyperbola asimptotik ke branch
-                      scotopic).
-        'auto'      : gunakan combined (Eq. 41) untuk semua B.
-
-    Returns
-    -------
-    float : kontras threshold (dimensionless)
+    All coefficient and cutoff rules belong to increment_threshold. Below the
+    floor contrast increases as 1/B, preserving a nonzero increment threshold.
+    Use increment_threshold directly for a zero background.
     """
-    if A_sr <= 0:
-        raise ValueError("Luas angular A harus > 0.")
-    if B <= 0:
-        raise ValueError("Luminansi background B harus > 0.")
-
-    # Clamp ke background floor untuk menangani zero-background
-    B_eff = max(B, B_FLOOR)
-
-    if mode == 'auto':
-        mode = 'combined'
-
-    # Zero-background: Eq. 50-52 — berlaku untuk semua mode
-    # Pada B ≤ B_FLOOR, R dan C∞ diganti konstanta limit (ξ₁, ξ₂)
-    if B_eff <= B_FLOOR:
-        C = ((_XI1 / A_sr) ** 0.6 + _XI2 ** 0.6) ** (5.0 / 3.0)
-        return F * C
-
-    if mode == 'scotopic':
-        # Scotopic normal: Eq. 47
-        # C = ((R/A)^(3/5) + C∞^(3/5))^(5/3)  dengan q = 0.6
-        R = R_scotopic(B_eff)
-        Cinf = Cinf_scotopic(B_eff)
-        C = ((R / A_sr) ** 0.6 + Cinf ** 0.6) ** (5.0 / 3.0)
-
-    elif mode == 'photopic':
-        R = R_photopic(B_eff)
-        Cinf = Cinf_photopic(B_eff)
-        q = q_parameter(B_eff)
-        C = ((R / A_sr) ** q + Cinf ** q) ** (1.0 / q)
-
-    else:  # combined
-        R = R_combined(B_eff)
-        Cinf = Cinf_combined(B_eff)
-        q = q_parameter(B_eff)
-        C = ((R / A_sr) ** q + Cinf ** q) ** (1.0 / q)
-
-    return F * C
+    B = _positive_value('B', B)
+    return _positive_value('C_threshold', increment_threshold(A_sr, B, F, mode) / B)
 
 
 def crumey_threshold(A_sr: float, B_cd: float, F: float = 1.0) -> float:
@@ -378,9 +445,8 @@ def crumey_threshold(A_sr: float, B_cd: float, F: float = 1.0) -> float:
 def crumey_visibility(Lt_cd: float, B_cd: float, A_sr: float,
                       F: float = 1.0) -> dict:
     """Cek visibilitas; Lt_cd adalah excess luminance objek [cd/m²]."""
-    if B_cd <= 0:
-        raise ValueError("B must be positive.")
-    delta_B_obj_cd = Lt_cd
+    B_cd = _positive_value('B_cd', B_cd)
+    delta_B_obj_cd = _nonnegative_value('Lt_cd', Lt_cd)
     C_obj = delta_B_obj_cd / B_cd
     C_th = crumey_threshold(A_sr, B_cd, F=F)
     visible = C_obj > C_th
@@ -394,50 +460,37 @@ def point_source_threshold_illuminance(B: float, F: float = 1.0,
     Scotopic (Eq. 32/53): ΔI = F × (r₁·B^(1/4) + r₂·B^(1/2))²
     Combined  (Eq. 34):   ΔI = F × (√(a₁B^½ + a₂B^¾ + a₃B) + a₄B^¼ + a₅B^½)²
 
-    Catatan: ΔI = B × R, karena untuk point source C = R/A dan ΔI = A × ΔB = A × B × C.
-    Tapi karena R = C×A dan ΔI = A×B×C = B×R, kita bisa hitung langsung.
+    Catatan: ΔI = F × B_eff × R(B_eff), dengan B_eff=max(B,B_FLOOR).
+    Ini limit A→0 dari increment_threshold, termasuk increment floor.
 
     Parameters
     ----------
-    B : float   Background luminance [cd/m²]
-    F : float   Field factor
-    mode : str  'scotopic' (Eq. 32, akurat B ≲ 0.05), 'combined' (Eq. 34,
-                valid semua B), atau 'auto' (= combined)
+    B : float   Actual background luminance [cd/m²], finite dan >= 0
+    F : float   Field factor, finite dan > 0
+    mode : str  Mengikuti domain increment_threshold; auto=combined.
 
     Returns
     -------
     float : threshold illuminance [lux]
     """
-    B_eff = max(B, B_FLOOR) if B > 0 else B_FLOOR
+    F = _positive_value('F', F)
+    B_eff, R, _, _ = _threshold_components(B, mode)
+    return _positive_value('delta_I_threshold', F * B_eff * R)
 
-    if mode == 'auto':
-        mode = 'combined'
 
-    # Zero-background: ΔI = F × ζ (Eq. 51/71) — berlaku untuk semua mode
-    if B_eff <= B_FLOOR:
-        return F * _ZETA
-
-    if mode == 'scotopic':
-        # Eq. 32: ΔI = (r₁·B^¼ + r₂·B^½)²
-        dI = (_r1 * B_eff ** 0.25 + _r2 * B_eff ** 0.5) ** 2
-
-    elif mode == 'combined':
-        # Eq. 34: ΔI = (√(a₁B^½ + a₂B^¾ + a₃B) + a₄B^¼ + a₅B^½)²
-        inner_sq = _a1 * B_eff**0.5 + _a2 * B_eff**0.75 + _a3 * B_eff
-        inner = math.sqrt(max(inner_sq, 0.0))
-        dI = (inner + _a4 * B_eff**0.25 + _a5 * B_eff**0.5) ** 2
-
-    else:
-        raise ValueError(f"Mode tidak dikenal: {mode}")
-
-    return F * dI
+def large_target_threshold_luminance(B: float, F: float = 1.0,
+                                     mode: str = 'auto') -> float:
+    """Large-area asymptote of increment_threshold, including its floor."""
+    F = _positive_value('F', F)
+    B_eff, _, Cinf, _ = _threshold_components(B, mode)
+    return _positive_value('delta_B_infinite', F * B_eff * Cinf)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # BAGIAN 6: RICCO AREA
 # ═══════════════════════════════════════════════════════════════════════════
 
-def ricco_area_sr(B: float) -> float:
+def ricco_area_sr(B: float, mode: str = 'auto') -> float:
     """Ricco area A_R [steradian]. Eq. 22/59.
     A_R = R(B) / C∞(B)
 
@@ -447,20 +500,13 @@ def ricco_area_sr(B: float) -> float:
 
     Menggunakan R_combined/Cinf_combined agar valid di semua level B.
     """
-    B_eff = max(B, B_FLOOR)
-    if B_eff <= B_FLOOR:
-        # Zero-background limit: A_R = ξ₁ / ξ₂
-        return _XI1 / _XI2
-    R = R_combined(B_eff)
-    Cinf = Cinf_combined(B_eff)
-    if Cinf <= 0:
-        return float('inf')
+    _, R, Cinf, _ = _threshold_components(B, mode)
     return R / Cinf
 
 
-def ricco_radius_arcmin(B: float) -> float:
+def ricco_radius_arcmin(B: float, mode: str = 'auto') -> float:
     """Ricco radius r_R [arcmin] = √(α_R / π)."""
-    alpha_sr = ricco_area_sr(B)
+    alpha_sr = ricco_area_sr(B, mode)
     alpha_arcmin2 = sr_to_arcmin2(alpha_sr)
     return math.sqrt(alpha_arcmin2 / math.pi)
 
@@ -477,9 +523,11 @@ def ricco_radius_approx(mu_sky: float) -> float:
 # BAGIAN 7: VISIBILITAS MATA TELANJANG
 # ═══════════════════════════════════════════════════════════════════════════
 
-def naked_eye_limiting_mag(mu_sky: float, F: float = 2.0) -> float:
+def naked_eye_limiting_mag(mu_sky: float, F: float = 2.0,
+                           mode: str = 'auto') -> float:
     """Limiting magnitude bintang dengan mata telanjang.
-    Dihitung dari Eq. 53 (eksak).
+    Dari point-source asymptote backend threshold yang sama dengan extended.
+    auto memakai combined; mode='scotopic' mereproduksi bentuk Eq. 53.
 
     Parameters
     ----------
@@ -493,7 +541,7 @@ def naked_eye_limiting_mag(mu_sky: float, F: float = 2.0) -> float:
     Contoh dari paper: untuk langit gelap μ = 21.83, F = 2 → m₀ = 6.18 mag.
     """
     B = mag_arcsec2_to_cdm2(mu_sky)
-    dI = point_source_threshold_illuminance(B, F=F, mode='scotopic')
+    dI = point_source_threshold_illuminance(B, F=F, mode=mode)
     return lux_to_mag(dI)
 
 
@@ -505,23 +553,24 @@ def naked_eye_limiting_mag_approx(mu_sky: float, F: float = 2.0) -> float:
     Eq. 54 (alternatif, range lebih sempit):
     m₀ ≈ 0.3834·μsky − 1.4400 − 2.5 log(F)  untuk 20 < μsky < 22.
     """
+    mu_sky = _finite_value('mu_sky', mu_sky)
+    F = _positive_value('F', F)
     return 0.4260 * mu_sky - 2.3650 - 2.5 * math.log10(F)
 
 
-def naked_eye_surface_brightness_limit(mu_sky: float, F: float = 2.0) -> float:
+def naked_eye_surface_brightness_limit(mu_sky: float, F: float = 2.0,
+                                       mode: str = 'auto') -> float:
     """Limiting surface brightness untuk target sangat besar (μ∞).
-    Dari Eq. 56: ΔB∞ = F × (k₁·B^(3/4) − k₂·B) [note: k₂ negatif!]
-    Lalu μ∞ = -2.5 log(ΔB∞) + 12.58.
+    Dari large-target asymptote backend yang sama dengan point/extended.
+    mode='scotopic' memakai Eq. 56: ΔB∞ = F(k₁B^(3/4) + k₂B).
+    Di bawah floor increment tetap pada nilai floor; zero point memakai Z_V.
 
     Returns
     -------
     float : μ∞ [mag/arcsec²]
     """
     B = mag_arcsec2_to_cdm2(mu_sky)
-    B_eff = max(B, B_FLOOR)
-    # ΔB∞ = F × C∞ × B = F × (k₁·B⁻¹/⁴ + k₂) × B = F × (k₁·B³/⁴ + k₂·B)
-    Cinf = Cinf_scotopic(B_eff)
-    dB_inf = F * Cinf * B
+    dB_inf = large_target_threshold_luminance(B, F, mode)
     return cdm2_to_mag_arcsec2(dB_inf)
 
 
@@ -530,11 +579,14 @@ def naked_eye_surface_brightness_limit_approx(mu_sky: float, F: float = 2.0) -> 
     μ∞ ≈ 0.6864·μsky + 9.9325 − 2.5 log(F)
     Valid untuk 18 < μsky < 22, error maks 0.02 mag/arcsec².
     """
+    mu_sky = _finite_value('mu_sky', mu_sky)
+    F = _positive_value('F', F)
     return 0.6864 * mu_sky + 9.9325 - 2.5 * math.log10(F)
 
 
 def naked_eye_extended_target(alpha_arcmin2: float, mu_sky: float,
-                               F: float = 2.0) -> Dict[str, float]:
+                               F: float = 2.0,
+                               mode: str = 'auto') -> Dict[str, float]:
     """Visibilitas target extended dengan mata telanjang. Eqs. 58-62.
 
     Menggabungkan limit point-source (m₀) dan limit surface brightness (μ∞)
@@ -556,24 +608,21 @@ def naked_eye_extended_target(alpha_arcmin2: float, mu_sky: float,
         'alpha_R_arcmin2'  : Ricco area [arcmin²]
         'ricco_radius_arcmin' : Ricco radius [arcmin]
     """
+    alpha_arcmin2 = _positive_value('alpha_arcmin2', alpha_arcmin2)
     B = mag_arcsec2_to_cdm2(mu_sky)
-    B_eff = max(B, B_FLOOR)
+    A_sr = arcmin2_to_sr(alpha_arcmin2)
+    delta_B_th = increment_threshold(A_sr, B, F, mode)
+    m0 = naked_eye_limiting_mag(mu_sky, F, mode)
+    mu_inf = naked_eye_surface_brightness_limit(mu_sky, F, mode)
 
-    m0 = naked_eye_limiting_mag(mu_sky, F)
-    mu_inf = naked_eye_surface_brightness_limit(mu_sky, F)
-
-    alpha_R_sr = ricco_area_sr(B_eff)
+    alpha_R_sr = ricco_area_sr(B, mode)
     alpha_R = sr_to_arcmin2(alpha_R_sr)
     r_R = math.sqrt(alpha_R / math.pi)
 
-    q = 0.6  # scotopic
-    alpha = alpha_arcmin2
-
-    # Eq. 62: mlim = m₀ − (2.5/q) × log₁₀((α/αR)^q + 1)
-    m_lim = m0 - (2.5 / q) * math.log10((alpha / alpha_R) ** q + 1)
-
-    # Eq. 60: μlim = μ∞ − (2.5/q) × log₁₀((αR/α)^q + 1)
-    mu_lim = mu_inf - (2.5 / q) * math.log10((alpha_R / alpha) ** q + 1)
+    # One physical luminance produces both limits, so μ=m+2.5log(A_arcsec²)
+    # exactly up to floating-point precision in every regime and at the floor.
+    m_lim = lux_to_mag(delta_B_th * A_sr)
+    mu_lim = cdm2_to_mag_arcsec2(delta_B_th)
 
     return {
         'm_lim': m_lim,
@@ -582,12 +631,33 @@ def naked_eye_extended_target(alpha_arcmin2: float, mu_sky: float,
         'mu_inf': mu_inf,
         'alpha_R_arcmin2': alpha_R,
         'ricco_radius_arcmin': r_R,
+        'delta_B_th': delta_B_th,
+        'C_th': delta_B_th / B,
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # BAGIAN 8: VISIBILITAS TELESKOPIK
 # ═══════════════════════════════════════════════════════════════════════════
+
+def _validate_telescopic_inputs(B: float, D: float, M: float,
+                                p: float, Ft: float) -> Tuple[float, float, float, float, float]:
+    B = _nonnegative_value('B', B)
+    D = _positive_value('D', D)
+    M = _positive_value('M', M)
+    p = _positive_value('p', p)
+    Ft = _positive_value('Ft', Ft)
+    if Ft < 1:
+        raise ValueError('Ft adalah 1/transmittance dan harus >= 1.')
+    return B, D, M, p, Ft
+
+
+def _telescopic_field_factor(F: float, FT: Optional[float], FM: float) -> float:
+    F = _positive_value('F', F)
+    FT = math.sqrt(2) if FT is None else _positive_value('FT', FT)
+    FM = _positive_value('FM', FM)
+    return _positive_value('phi', F * FT * FM)
+
 
 def _telescopic_params(B: float, D: float, M: float, p: float, Ft: float):
     """Hitung parameter teleskopik internal (helper function).
@@ -602,7 +672,8 @@ def _telescopic_params(B: float, D: float, M: float, p: float, Ft: float):
         Ba_eff      : Ba di-clamp ke B_FLOOR
         d0          : exit pupil di mana background menjadi efektif nol (Eq. 70)
     """
-    d = D / M                          # exit pupil
+    B, D, M, p, Ft = _validate_telescopic_inputs(B, D, M, p, Ft)
+    d = _positive_value('exit pupil', D / M)
     delta_min = min(d, p)
     delta_max = max(d, p)
 
@@ -617,11 +688,68 @@ def _telescopic_params(B: float, D: float, M: float, p: float, Ft: float):
     return d, delta_min, delta_max, Ba, Ba_eff, d0
 
 
+def telescopic_extended_threshold(
+        A_sr: float, B: float, D: float, M: float,
+        p: float = 0.007, Ft: float = 1.33,
+        F: float = 2.0, FT: Optional[float] = None,
+        FM: float = 1.0, mode: str = 'auto', *,
+        dimming_factor: Optional[float] = None) -> Dict[str, float]:
+    """One telescopic extended-source contract using sky inputs in SI units.
+
+    The optical dimming g=(min(D/M,p)/p)^2/Ft acts equally on target and
+    background: B_a=g B, ΔB_a=g ΔB; the actual apparent area is M² A.
+    Optional dimming_factor in [0,1] supplies an independently computed optical
+    throughput, e.g. a clipped annular exit pupil. FT defaults to sqrt(2) for
+    monocular viewing; FM is an explicit field-factor assumption (Sec. 1.6.4).
+
+    At B_a below B_FLOOR this implementation keeps actual M² A and freezes
+    the increment at the floor for that area. This is a declared extension,
+    differing from paper Sec. 3.3's M0-frozen extended-source cutoff. It keeps
+    point and extended helpers on one threshold curve; it is not empirically
+    validated for highly magnified crescents, aberrations or very wide fields.
+
+    C_th compares sky contrast ΔB/B with threshold; delta_B_th is the excess
+    sky luminance required. With zero sky B, C_th is +inf (contrast undefined)
+    but increment outputs remain valid. Fully blocked throughput g=0 yields
+    infinite sky-referred threshold, with no division by zero.
+    """
+    A_sr = _positive_value('A_sr', A_sr)
+    B, D, M, p, Ft = _validate_telescopic_inputs(B, D, M, p, Ft)
+    phi = _telescopic_field_factor(F, FT, FM)
+    d, delta_min, delta_max, _, _, d0 = _telescopic_params(B, D, M, p, Ft)
+    g = (delta_min / p) ** 2 / Ft
+    if dimming_factor is not None:
+        g = _nonnegative_value('dimming_factor', dimming_factor)
+        if g > 1:
+            raise ValueError('dimming_factor harus <= 1 untuk optik pasif.')
+    M_squared = _positive_value('M_squared', M * M)
+    A_app_sr = _positive_value('A_app_sr', A_sr * M_squared)
+    B_a = _nonnegative_value('B_a', g * B)
+    delta_B_app_th = increment_threshold(A_app_sr, B_a, phi, mode)
+    delta_B_th = _positive_value('delta_B_th', delta_B_app_th / g) if g > 0 else float('inf')
+    C_th = (_positive_value('C_th', delta_B_th / B)
+            if B > 0 and g > 0 else float('inf'))
+    return {
+        'C_th': C_th,
+        'delta_B_th': delta_B_th,
+        'delta_B_app_th': delta_B_app_th,
+        'B_a': B_a,
+        'A_app_sr': A_app_sr,
+        'dimming_factor': g,
+        'phi': phi,
+        'exit_pupil': d,
+        'delta_min': delta_min,
+        'delta_max': delta_max,
+        'exit_pupil_cutoff': d0,
+        'floor_applied': B_a <= B_FLOOR,
+    }
+
+
 def telescopic_point_source_limit(
         mu_sky: float, D: float, M: float,
         p: float = 0.007, Ft: float = 1.33,
         F: float = 2.0, FT: Optional[float] = None,
-        FM: float = 1.0) -> float:
+        FM: float = 1.0, mode: str = 'auto') -> float:
     """Limiting magnitude bintang melalui teleskop. Eqs. 65-73.
 
     Parameters
@@ -644,25 +772,15 @@ def telescopic_point_source_limit(
       → mcut = 5 log(D[cm]) + 8.45 - 2.5 log(F)
              = 5 log(10) + 8.45 - 0.75 = 12.70 mag
     """
-    if FT is None:
-        FT = math.sqrt(2)
-
-    phi = FT * FM * F  # total field factor (Sec. 3.2)
-
+    phi = _telescopic_field_factor(F, FT, FM)
+    _, D, M, p, Ft = _validate_telescopic_inputs(0.0, D, M, p, Ft)
     B = mag_arcsec2_to_cdm2(mu_sky)
     d, delta_min, delta_max, Ba, Ba_eff, d0 = _telescopic_params(B, D, M, p, Ft)
-
-    if Ba <= B_FLOOR:
-        # Zero-background cutoff: Eq. 71-72
-        # Icut = ζ × (p/D)² × Ft × φ
-        # Di sini δmax = p karena d < d₀ ≤ p (biasanya)
-        dI_cut = _ZETA * (p / D) ** 2 * Ft * phi
-        return lux_to_mag(dI_cut)
-
-    # Kasus normal: Eq. 68
-    # ΔI = (δmax/D)² × Ft × φ × (r₁·Ba^¼ + r₂·Ba^½)²
-    dI = (delta_max / D) ** 2 * Ft * phi * (_r1 * Ba_eff**0.25 + _r2 * Ba_eff**0.5) ** 2
-
+    g = (delta_min / p) ** 2 / Ft
+    # ΔI_app = M² g ΔI_sky, with the same point-source asymptote as extended.
+    M_squared = _positive_value('M_squared', M * M)
+    flux_gain = _positive_value('apparent flux gain', g * M_squared)
+    dI = _positive_value('sky delta_I_threshold', point_source_threshold_illuminance(Ba, phi, mode) / flux_gain)
     return lux_to_mag(dI)
 
 
@@ -675,9 +793,11 @@ def telescopic_point_source_limit_approx(
     m₀ ≈ 0.426μsky − 2.365 + 5log(D/δmax) − 2.131log(δmin/p)
          − 1.435logFt − 2.5log(FM·FT·F)
     """
+    _telescopic_field_factor(F, FT, FM)
+    _, D, M, p, Ft = _validate_telescopic_inputs(0.0, D, M, p, Ft)
+    mu_sky = _finite_value('mu_sky', mu_sky)
     if FT is None:
         FT = math.sqrt(2)
-
     d = D / M
     delta_min = min(d, p)
     delta_max = max(d, p)
@@ -691,16 +811,15 @@ def telescopic_point_source_limit_approx(
 
 def telescopic_cutoff_mag(D: float, p: float = 0.007, Ft: float = 1.33,
                            F: float = 2.0, FT: Optional[float] = None,
-                           FM: float = 1.0) -> float:
+                           FM: float = 1.0, mode: str = 'auto') -> float:
     """Magnitude limit absolut teleskop (zero-background cutoff). Eq. 72-73.
     mcut = 5 log D − 2.5 log(Z⁻¹ ζ p² Ft FM FT F)
 
     Ini adalah limit yang tidak bisa dilampaui seberapapun magnifikasinya.
     """
-    if FT is None:
-        FT = math.sqrt(2)
-    phi = FT * FM * F
-    dI_cut = _ZETA * (p / D) ** 2 * Ft * phi
+    _, D, _, p, Ft = _validate_telescopic_inputs(0.0, D, 1.0, p, Ft)
+    phi = _telescopic_field_factor(F, FT, FM)
+    dI_cut = point_source_threshold_illuminance(0.0, phi, mode) * (p / D) ** 2 * Ft
     return lux_to_mag(dI_cut)
 
 
@@ -709,16 +828,17 @@ def telescopic_exit_pupil_cutoff(B: float, p: float = 0.007,
     """Exit pupil d₀ di mana background menjadi efektif nol. Eq. 70.
     d₀ = p × √(10⁻⁵ × Ft / B)  [m]
 
-    Untuk d < d₀, magnifikasi lebih lanjut tidak meningkatkan threshold.
+    Ini menandai cutoff point-source; threshold extended tetap memakai M²A.
     """
-    return p * math.sqrt(B_FLOOR * Ft / B)
+    B, _, _, p, Ft = _validate_telescopic_inputs(B, 1.0, 1.0, p, Ft)
+    return p * math.sqrt(B_FLOOR * Ft / B) if B > 0 else float('inf')
 
 
 def telescopic_extended_target(
         alpha_arcmin2: float, mu_sky: float, D: float, M: float,
         p: float = 0.007, Ft: float = 1.33,
         F: float = 2.0, FT: Optional[float] = None,
-        FM: float = 1.0) -> Dict[str, float]:
+        FM: float = 1.0, mode: str = 'auto') -> Dict[str, float]:
     """Visibilitas target extended melalui teleskop. Eqs. 77-89.
 
     Menghitung threshold curve teleskopik, yang berbentuk sama dengan
@@ -739,38 +859,17 @@ def telescopic_extended_target(
         'mu_inf'            : large-target surface brightness limit
         'alpha_TR_arcmin2'  : telescopic Ricco area pada langit [arcmin²]
     """
-    if FT is None:
-        FT = math.sqrt(2)
-
-    phi = FT * FM * F
-
+    alpha_arcmin2 = _positive_value('alpha_arcmin2', alpha_arcmin2)
     B = mag_arcsec2_to_cdm2(mu_sky)
-    d, delta_min, delta_max, Ba, Ba_eff, d0 = _telescopic_params(B, D, M, p, Ft)
-
-    # Hitung threshold di apparent background (Eq. 78-80)
-    Ra = R_scotopic(Ba_eff)
-    Ca = Cinf_scotopic(Ba_eff)
-    q = 0.6  # scotopic
-
-    # Eq. 81: telescopic Ricco area pada langit [sr]
-    # ATR = Ra / (M² × Ca)
-    alpha_TR_sr = Ra / (M ** 2 * Ca)
+    A_sr = arcmin2_to_sr(alpha_arcmin2)
+    threshold = telescopic_extended_threshold(A_sr, B, D, M, p, Ft, F, FT, FM, mode)
+    Ba, g, phi = threshold['B_a'], threshold['dimming_factor'], threshold['phi']
+    alpha_TR_sr = ricco_area_sr(Ba, mode) / M ** 2
     alpha_TR = sr_to_arcmin2(alpha_TR_sr)
-
-    # Point-source limit
-    m0 = telescopic_point_source_limit(mu_sky, D, M, p, Ft, F, FT, FM)
-
-    # Eq. 86: large-target surface brightness limit
-    # μ∞ = μsky − 2.5 log(φ × Ca)
-    mu_inf = cdm2_to_mag_arcsec2(phi * Ca * B)
-
-    alpha = alpha_arcmin2
-
-    # Eq. 88: mlim = m₀ − (2.5/q) × log₁₀((α/αTR)^q + 1)
-    m_lim = m0 - (2.5 / q) * math.log10((alpha / alpha_TR) ** q + 1)
-
-    # Eq. 84: μlim = μ∞ − (2.5/q) × log₁₀((αTR/α)^q + 1)
-    mu_lim = mu_inf - (2.5 / q) * math.log10((alpha_TR / alpha) ** q + 1)
+    m0 = telescopic_point_source_limit(mu_sky, D, M, p, Ft, F, FT, FM, mode)
+    mu_inf = cdm2_to_mag_arcsec2(large_target_threshold_luminance(Ba, phi, mode) / g)
+    m_lim = lux_to_mag(threshold['delta_B_th'] * A_sr)
+    mu_lim = cdm2_to_mag_arcsec2(threshold['delta_B_th'])
 
     return {
         'm_lim': m_lim,
@@ -778,6 +877,7 @@ def telescopic_extended_target(
         'm0': m0,
         'mu_inf': mu_inf,
         'alpha_TR_arcmin2': alpha_TR,
+        **threshold,
     }
 
 
@@ -812,10 +912,8 @@ def is_visible(Lt_cdm2: float, B_cdm2: float, A_sr: float,
         'margin_mag'  : margin visibilitas dalam magnitude
                         (positif = terlihat, negatif = tidak)
     """
-    if B_cdm2 <= 0:
-        raise ValueError("Background luminance harus > 0.")
-
-    delta_B_obj_cd = Lt_cdm2
+    B_cdm2 = _positive_value('B_cdm2', B_cdm2)
+    delta_B_obj_cd = _nonnegative_value('Lt_cdm2', Lt_cdm2)
     C_obj = delta_B_obj_cd / B_cdm2
     C_th = contrast_threshold(A_sr, B_cdm2, F=F)
     visible = C_obj > C_th
@@ -902,18 +1000,14 @@ def hilal_naked_eye_visibility(
         'regime'        : regime visual ('photopic'/'mesopic'/'scotopic')
     """
     # Langkah 1: Konversi nL → cd/m²
+    L_hilal_nL = _nonnegative_value('L_hilal_nL', L_hilal_nL)
+    B_sky_nL = _positive_value('B_sky_nL', B_sky_nL)
+    F = _positive_value('F', F)
+    # Validate mode/domain even for a legitimate zero-area source.
+    _threshold_components(nL_to_cdm2(B_sky_nL), mode)
     delta_B_obj_cd = nL_to_cdm2(L_hilal_nL)
     L_cd = delta_B_obj_cd  # alias output untuk kompatibilitas
     B_cd = nL_to_cdm2(B_sky_nL)
-
-    if B_cd <= 0:
-        return {
-            'C_obj': float('nan'), 'C_th': float('nan'),
-            'visible': False, 'margin': float('-inf'), 'delta_m': float('-inf'),
-            'L_cd': L_cd, 'B_cd': B_cd,
-            'A_sr': 0, 'A_arcmin2': 0,
-            'regime': 'unknown',
-        }
 
     # Langkah 2: Luas sabit
     A_arcmin2 = crescent_area_arcmin2(elongation_deg, moon_sd_deg)

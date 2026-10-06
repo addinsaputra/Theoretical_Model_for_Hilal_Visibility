@@ -1,0 +1,68 @@
+# Batas ilmiah model Crumey untuk hilal
+
+Audit lanjutan 5 Oktober 2026. Rumus threshold Crumey, satuan, increment contrast, transfer optik, dan identitas fotometri telah diperiksa. Kesimpulan yang dapat dipertahankan adalah **implementasi konsisten dengan kontrak target ideal yang dinyatakan**. Itu belum membuktikan bahwa area, luminansi, pengamat, dan kondisi hilal nyata memenuhi asumsi target ideal tersebut.
+
+Konversi sumber hilal juga telah disamakan dengan zero point V Crumey. Pembulatan lama `2.51` dan `0.263 nL/S10` memberi residual sekitar 0.007–0.009 mag untuk fase 160–179°. Sekarang `S10_TO_NL=0.26195630393381236` dan rasio flux memakai `10**(0.4*(10-m))`. Luminansi intrinsik × solid angle tepat mengembalikan flux magnitude phase law. Koefisien phase law tetap; konsistensi satuan tidak memvalidasi phase law itu sendiri.
+
+| Besaran | Kontrak aktif |
+| --- | --- |
+| `L_hilal` | Excess luminance setelah transmisi atmosfer, bukan total luminansi patch target |
+| `B_sky` | Luminansi background; nL dikonversi ke cd/m² sebelum threshold |
+| `A` | Luas proyeksi baseline dalam sr, berdasarkan elongasi dan semidiameter toposentrik |
+| `C_obj` | `L_hilal/B_sky`; total patch target adalah `B_sky+L_hilal` |
+| `delta_B_th` | Increment luminansi minimum menurut kurva threshold, cd/m² |
+| `C_th` | `delta_B_th/B_sky` dengan background aktual |
+| Teleskop | Target dan background menerima `g` yang sama; area menjadi `M²A`; threshold menerima `sqrt(2)*F` saat `FM=1` |
+| Margin | `2.5*log10(C_obj/C_th)`; tanda margin adalah keputusan model, bukan probabilitas keberhasilan |
+
+**1. Area tidak cukup mendeskripsikan sabit yang sangat tipis.** Crumey menggunakan data target cakram seragam. Dukungan untuk memperluas pendekatan area-only ke persegi panjang dibahas hingga aspect ratio sekitar 7, bukan seluruh bentuk memanjang tanpa batas (Sec. 1.6.3, halaman 2605–2606). Pada radius sudut 0.26°, baseline menghasilkan:
+
+| Elongasi | Diameter/lebar maksimum | Lebar maksimum sabit |
+| ---: | ---: | ---: |
+| 5° | 525.6 | 3.56 arcsec |
+| 8° | 205.5 | 9.11 arcsec |
+| 10° | 131.6 | 14.22 arcsec |
+
+Rasio tersebut adalah indikator geometri, bukan penyamaan hilal dengan persegi panjang. Hilal melengkung, cusp meruncing, dan luminansinya tidak seragam. Mata dapat mendeteksi satu bagian busur; menjumlahkan seluruh area dan menggantinya dengan cakram seragam dapat mengubah spatial summation. Target dengan area kecil tetapi panjang puluhan arcmin juga belum otomatis setara dengan point source. Arah dan besar bias tidak dapat ditetapkan hanya dari rasio bentuk. Prioritas ilmiah: gunakan peta luminansi atau segmen efektif yang diuji terhadap pengamatan visual; faktor area arbitrer tidak menyelesaikan persoalan tersebut.
+
+**2. Phase law sumber belum teruji sebagai fotometri khusus hilal sangat muda.** Dalam `Core/visual_limit_kastner.py`, magnitude adalah `m=0.026*alpha+4e-9*alpha**4-12.73`, lalu seluruh flux dibagi luas sabit. Secara aljabar pada `alpha=180°`, formula masih memberi `m=-3.85096`, atau flux V `8.81491e-5 lux`. Jika `alpha` mendekati 180° dan elongasi mendekati nol, area sabit menuju nol tetapi flux formula tidak; mean luminance dapat meningkat seperti kebalikan area. Guard luas nol hanya menangani titik tepat nol.
+
+Sebagai model khusus cahaya bagian sabit yang disinari Matahari, perilaku limit ini memerlukan dasar fisik atau batas domain yang jelas. Jika flux finite tersebut mencakup kontribusi earthshine, kontribusinya tersebar pada bagian gelap dan perlu dipisahkan; seluruh flux itu tidak dapat begitu saja ditempatkan pada area sabit tersinari. Ini alasan untuk memeriksa domain dan sumber phase law terhadap fotometri lunar, bukan untuk menambah cutoff elongasi atau menyesuaikan F tanpa data. Crumey menerima luminansi sumber sebagai input; ketepatan threshold tidak memperbaiki sumber yang keliru.
+
+**3. Jarak mengubah area tetapi belum mengoreksi amplitude flux phase law.** Semidiameter sudah berasal dari jarak toposentrik DE440s. Namun formula magnitude di atas hanya memakai phase angle; tidak ada koreksi eksplisit jarak pengamat–Bulan maupun Matahari–Bulan. Pada phase angle dan elongasi yang sama, kode menghasilkan integrated flux yang sama untuk semua semidiameter. Mean luminance kemudian berbanding terbalik dengan `r²`: perubahan radius 0.25° menjadi 0.27° mengurangi mean luminance menjadi sekitar 85.7%.
+
+Untuk permukaan yang sama dengan pencahayaan/phase tetap, luas sudut dan flux terima secara ideal sama-sama berubah mengikuti jarak, sehingga surface brightness tidak seharusnya berubah dengan cara itu. Phase law dapat diperlakukan sebagai aproksimasi magnitude pada jarak referensi, tetapi normalisasi jarak tersebut perlu diketahui sebelum koreksi ditambahkan. Penggunaan radius aktual sudah benar sebagai geometri; amplitude flux lunar masih menyimpan aproksimasi. Tidak ditambahkan referensi jarak atau koefisien baru yang tidak ditetapkan oleh sumber model.
+
+**4. Combined adalah fit achromatic, belum menjadi model langit senja berwarna.** Persamaan combined memperbaiki pemilihan kurva terhadap background, tetapi tidak menambahkan kanal warna. Crumey sendiri menyatakan bahwa target di langit biru dan aplikasi mesopic memerlukan chromaticity serta data eksperimen lain (Sec. 4, halaman 2617). Paper juga tidak mengharapkan hasilnya berlaku langsung pada pencitraan CCD. Hilal, langit senja, dan light pollution mempunyai spektrum berbeda; angka cd/m² yang sama tidak menjamin stimulus visual ekuivalen.
+
+Pada kondisi scotopic, Sec. 1.3 memberi transformasi photometric ke ekuivalen laboratorium. Untuk target additive, bentuk yang relevan adalah `B*=(rho_sky/rho_lab)*B` dan `L*=(rho_hilal/rho_lab)*L`. Maka kontras efektif bergantung pada rasio S/P target terhadap background. Helper S/P tersedia, tetapi tidak terhubung otomatis ke hilal karena spektrum belum tersedia. Koreksi scotopic tidak boleh diterapkan sebagai koreksi universal mesopic/photopic. Besar error warna belum terukur pada dataset ini.
+
+Pemeriksaan domain matematis juga perlu dibedakan dari domain data. Background Blackwell mencapai sekitar 3426 cd/m² (Sec. 1.2), sementara fungsi combined tetap dapat mengembalikan angka positif di atasnya. Pada 14.440 scene dataset, background naked eye mencapai 5934.64 cd/m² dan **23 scene** melampaui 3426 cd/m²; nilai tersebut merupakan extrapolasi terhadap jangkauan background laboratorium yang dibahas. Background apparent teleskop seluruhnya lebih rendah, maksimum 373.78 cd/m². Fungsi yang tidak error pada suatu input tidak dengan sendirinya telah divalidasi pada input tersebut.
+
+**5. Pupil dan sensitivitas pengamat mempunyai peran berbeda.** Data laboratorium memakai observer terlatih usia 19–26, adaptasi penuh, dan pengamatan binocular (Sec. 1.2, halaman 2601). Pupil fallback kode untuk usia 22 adalah sekitar 6.83 mm, sementara pupil aktual saat senja tidak direkonstruksi dari brightness dan riwayat adaptasi. Pada exit pupil 2 mm, mengganti input pupil 6.83 mm dengan 3 mm mengubah background apparent sekitar 5.19 kali dalam rumus geometrik. Angka ini ilustrasi sensitivitas input, bukan estimasi pupil aktual atau bias pasti.
+
+Usia hanya mengubah estimator pupil. Transparansi media mata, glare intraokular, sensitivitas retina, pengalaman, dan fatigue belum mempunyai model yang dikalibrasi. Dengan F tetap, pupil lebih kecil dapat menurunkan threshold pada beberapa kondisi, sehingga pengamat tua tampak lebih baik dalam simulasi. Itu tidak boleh dibaca sebagai prediksi pengaruh usia manusia. `pupil_diameter_mm` menyediakan override aktual; sensitivitas usia perlu multiplier tersendiri yang didukung data visual.
+
+**6. Optik geometrik belum mencakup resolusi, PSF, dan bidang pandang.** Faktor annular `g` benar untuk transfer radiance ideal, pupil terpusat, dan geometri yang dipakai. Ia belum memodelkan blur, difraksi, fokus, kualitas eyepiece, scattering, vignetting, atau pupil yang tidak terpusat. `Fr` yang masih tersimpan merupakan diagnostik historis; ia tidak aktif mengubah threshold. `FM=1` merupakan asumsi, bukan hasil kalibrasi untuk semua magnification.
+
+Pada contoh elongasi 5°, lebar baseline hanya 3.56 arcsec. Blur yang sebanding dapat mengubah luminansi lokal dan distribusi area, meskipun flux total terkonservasi. Batas difraksi eye/seeing dibahas dalam Sec. 1.6.2 dan 1.6.4; paper menyebut exit pupil sekitar 0.5 mm sebagai wilayah mulai pentingnya difraksi mata. Untuk D=100 mm, nilai itu tercapai pada M=200. Menaikkan M jauh di atasnya dengan FM tetap memerlukan pembenaran tambahan.
+
+Area `M²A` juga mengasumsikan seluruh target yang dijumlahkan dapat dilihat. Bulan berdiameter sekitar 0.52° menjadi sekitar 26° apparent pada 50× dan 104° pada 200×. Dalam skenario eyepiece dengan apparent field 50°, seluruh diameter tidak muat pada 200×. AFOV dan field stop belum menjadi input. Bagian sabit yang terlihat, bukan seluruh area sabit, seharusnya menentukan stimulus ketika bidang pandang memotong target. Tidak ada batas M fisik universal yang dapat ditambahkan tanpa konfigurasi instrumen.
+
+**7. Background tunggal dan waktu optimal belum merekonstruksi kesempatan pengamatan nyata.** Core menggunakan satu nilai background di arah objek dan meteorologi IFS untuk atmosfer. Hilal dekat horizon dapat menghadapi gradien langit, glare Matahari, aerosol lokal, awan tipis, serta perubahan transparansi dan seeing yang lebih cepat daripada sampling meteorologi. Input RH/T/pressure bukan pengukuran langsung transparansi LOS atau radiance langit. Background sekitar cusp/busur yang terdeteksi juga dapat berbeda dari mean yang digunakan.
+
+Scan optimum memberi kesempatan menurut model. Ia tidak menunjukkan bahwa observer sedang mencari pada waktu itu, memiliki bidang pandang/fokus yang sesuai, atau menunggu pada interval yang sama. Viewing time pada paper bukan integrasi CCD; Sec. 1.6.1 membedakan mekanisme retinal dari keuntungan menunggu momen atmosfer yang baik. Label negatif memerlukan bukti upaya pengamatan yang sah sebelum diperlakukan sebagai kegagalan threshold.
+
+**8. F dan margin belum menentukan probabilitas deteksi hilal.** F menggabungkan laboratory scaling, observer, kondisi pengamatan, dan penyimpangan stimulus. Menjadikannya satu angka tetap dapat menyerap beberapa bias tetapi tidak mengidentifikasi penyebabnya. Menggandakan F menurunkan margin 0.7526 mag; faktor monocular `sqrt(2)` menaikkan threshold setara 0.3763 mag. Error flux 20% saja menggeser margin sekitar 0.1980 mag. Margin positif kecil perlu dibaca bersama ketidakpastian tersebut.
+
+Threshold laboratorium mempunyai definisi statistik dan scaling tertentu; `q` merupakan parameter joining kurva, bukan probabilitas. `delta_m>0` tidak berarti pengamatan pasti sukses, confidence tertentu, atau target terlihat selama persentase waktu tertentu. Dataset visual yang mencatat observer, upaya, waktu, dan instrumen diperlukan untuk mengaitkan margin dengan tingkat keberhasilan. Default F naked eye dan telescope yang berbeda juga ikut memengaruhi gain yang dilaporkan.
+
+**9. Geometri area dan cutoff masih mengandung pilihan yang dinyatakan.** Area baseline adalah `pi*r²*sin²(E/2)`, dengan E elongasi. Projected illuminated fraction dari phase angle alpha adalah `(1+cos(alpha))/2`. Keduanya ekuivalen ketika `alpha≈180°-E`; Matahari pada jarak berhingga dan definisi posisi apparent/astrometric membuat kesetaraan itu hanya aproksimasi. Contoh Semarang 22 Maret 2023 yang sebelumnya diperiksa mempunyai ratio area fase terhadap area elongasi sekitar 1.00490. Area ini perlu dibedakan dari lebar diagnostik yang sudah memakai phase angle. Mengubah area harus dilakukan bersama pada luminansi dan threshold; mengganti argument tanpa mengganti bentuk fungsi akan keliru.
+
+Untuk background di bawah `1e-5 cd/m²`, kode membekukan increment untuk area aktual. Ini ekstensi kontinu yang didokumentasikan, berbeda dari Eq. 50 literal dan pendekatan M0 untuk cutoff extended source dalam Sec. 3.3. Seluruh scene dataset yang diperiksa berada di atas floor, sehingga data ini tidak menguji pilihan tersebut. Ketiadaan masalah dalam contoh senja tidak memvalidasi extrapolasi gelap atau magnification ekstrem.
+
+**10. Data CCD tidak mengkalibrasi threshold penglihatan manusia.** Pengguna mengonfirmasi 278 label berasal dari CCD/citra digital, tanpa instrumen atau waktu aktual. Mekanisme deteksi bergantung pada exposure, quantum efficiency, sensor noise, sampling, stacking, dan image processing, yang tidak dinyatakan oleh F visual. Karena itu 0 baris layak mengkalibrasi Crumey naked eye maupun visual telescope. Nilai kesepakatan dan perubahan area pada [laporan observasi](../validation/crumey_empirical/report.md) merupakan pembandingan deskriptif. Perubahan hanya satu klasifikasi ketika area diturunkan sampai 10% tidak membuktikan luas penuh tepat. Kasus tersebut mempunyai margin hanya `+0.00141 mag` pada area penuh, sehingga koreksi fotometri kecil pun memindahkannya melintasi threshold.
+
+Urutan prioritas ilmiah: audit/ukur radiance khusus sabit dan domain phase law; kumpulkan label visual yang terverifikasi beserta waktu dan optik; uji bentuk/segmen dan spektrum/adaptasi; kemudian estimasi faktor pengamat dengan holdout campaign. Koreksi unit dan rumus dikerjakan sekarang; koefisien fisiologis, phase law baru, serta cutoff elongasi tidak dibuat dari label CCD.
+
+Rujukan utama adalah PDF Crumey yang diberikan pengguna, [versi penerbit](https://academic.oup.com/mnras/article/442/3/2600/1052389), khususnya Sec. 1.2, 1.3, 1.6.1–1.6.4, 3.3, dan 4. Temuan phase law/jarak berasal dari telaah kode `Core/visual_limit_kastner.py` dan aljabar flux–solid angle; paper Crumey tidak menyediakan kalibrasi fotometri hilal tersebut.

@@ -21,7 +21,7 @@ from visual_limit_kastner import (
 from full_rumus_crumey import (
     crescent_area_deg2, crescent_area_arcmin2, crescent_area_sr,
     crumey_visibility, is_visible, hilal_naked_eye_visibility,
-    visibility_margin_mag, arcmin2_to_sr,
+    visibility_margin_mag, arcmin2_to_sr, nL_to_cdm2, mag_to_lux,
 )
 from core_crescent_visibility import HilalVisibilityCalculator, _simpan_excel_multi, _plot_multi_lokasi
 from core_multi_location import run_single_observation, save_to_csv, save_to_excel
@@ -55,9 +55,11 @@ class AtmosphericInterfaceTests(unittest.TestCase):
         alpha, elongation, r = 170, 8, 0.26
         mv = 0.026 * alpha + 4e-9 * alpha**4 - 12.73
         area = 0.5 * math.pi * r**2 * (1 - math.cos(math.radians(elongation)))
-        expected = 2.51 ** (10 - mv) / area
         intrinsic = hitung_luminansi_intrinsik(alpha, elongation, r)
-        self.assertAlmostEqual(intrinsic / expected, 1)
+        # Mean luminance times solid angle must recover the phase-law flux,
+        # using the same V zero point as Crumey's limiting magnitudes.
+        flux = nL_to_cdm2(terapkan_transmisi_atmosfer(intrinsic, 1)) * area * math.radians(1)**2
+        self.assertAlmostEqual(flux / mag_to_lux(mv), 1, places=12)
         self.assertEqual(terapkan_transmisi_atmosfer(intrinsic, 1), S10_TO_NL * intrinsic)
         transmission = transmission_from_extinction_mag(1)
         self.assertAlmostEqual(

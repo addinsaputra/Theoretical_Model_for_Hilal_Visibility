@@ -5,21 +5,21 @@ import sys
 import os
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side, numbers
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 # Import modul yang diperlukan
 from visual_limit_schaefer import hitung_sky_brightness
-from visual_limit_kastner import hitung_luminansi_intrinsik, terapkan_transmisi_atmosfer
+from visual_limit_kastner import hitung_fotometri_intrinsik, terapkan_transmisi_atmosfer
 # Import langsung dari modul Crumey (tanpa intermediary crumey_telescope_correction.py)
 from full_rumus_crumey import (
     hilal_naked_eye_visibility,
     nL_to_cd_m2,
-    cd_m2_to_nL,
     arcmin2_to_sr,
-    contrast_threshold,
     crescent_area_arcmin2,
     visibility_margin_mag,
+    telescopic_extended_threshold,
+    threshold_parameters,
 )
 from telescope_limit import TelescopeVisibilityModel
 
@@ -60,6 +60,53 @@ from data_hisab import (
     refraction_horizon_degree
 )
 
+
+
+def _telescope_configuration(aperture: float, magnification: float, **kwargs) -> dict:
+    """One validated configuration reused at sunset, scan and refinement.
+
+    ``observer_age`` controls only the fallback pupil estimate. A measured or
+    independently modelled twilight pupil can be supplied in millimetres.
+    Field factor includes any independently calibrated observer sensitivity.
+    """
+    parameters = {
+        'aperture': aperture, 'magnification': magnification,
+        'transmission': 0.95, 'n_surfaces': 6, 'central_obstruction': 0.0,
+        'observer_age': 22.0, 'field_factor': 2.4, 'pupil_diameter_mm': None,
+    }
+    unknown = set(kwargs) - set(parameters)
+    if unknown:
+        raise TypeError('Unknown telescope configuration: ' + ', '.join(sorted(unknown)))
+    parameters.update(kwargs)
+    if not math.isfinite(parameters['field_factor']) or parameters['field_factor'] <= 0:
+        raise ValueError('field_factor must be positive and finite')
+    TelescopeVisibilityModel().calculate_factors(
+        D=parameters['aperture'], Ds=parameters['central_obstruction'],
+        M=parameters['magnification'], De=parameters['pupil_diameter_mm'],
+        age=parameters['observer_age'], t1=parameters['transmission'],
+        n=parameters['n_surfaces'],
+    )
+    return parameters
+
+
+def _validated_crescent_area_sr(posisi: Dict[str, float]) -> float:
+    """Validate geometric domain while retaining E=0 as a no-source case."""
+    elongation = float(posisi['elongation'])
+    semidiameter = float(posisi['moon_semidiameter'])
+    if not math.isfinite(elongation) or not (0 <= elongation <= 180):
+        raise ValueError('Elongation must be finite and in [0, 180] degrees')
+    if not math.isfinite(semidiameter) or semidiameter <= 0:
+        raise ValueError('Moon semidiameter must be positive and finite')
+    return arcmin2_to_sr(crescent_area_arcmin2(elongation, semidiameter))
+
+
+def _threshold_gain_mag(naked_threshold: float, telescopic_threshold: float) -> float:
+    """Gain is -inf for blocked optics; two absent targets have no gain."""
+    if naked_threshold <= 0 or telescopic_threshold <= 0:
+        return 0.0
+    if math.isinf(naked_threshold) and math.isinf(telescopic_threshold):
+        return 0.0
+    return 2.5 * (math.log10(naked_threshold) - math.log10(telescopic_threshold))
 
 
 def deg_to_dms(deg: float) -> str:
@@ -566,6 +613,7 @@ class HilalVisibilityCalculator:
         B_sky_nL = float(result["sky_brightness"])
         if B_sky_nL <= 0:
             raise ValueError("Sky brightness Schaefer harus positif.")
+        self._scene_atmosphere = result
         return (
             B_sky_nL,
             float(result["k_v"]),
@@ -579,12 +627,13 @@ class HilalVisibilityCalculator:
         transmission_v: float,
     ) -> float:
         """Direct/excess luminance hilal [nL] dengan transmisi Schaefer."""
-        L_star_s10 = hitung_luminansi_intrinsik(
+        photometry = hitung_fotometri_intrinsik(
             phase_angle_deg=posisi['phase_angle'],
             elongation_deg=posisi['elongation'],
             r_deg=float(posisi['moon_semidiameter']),
         )
-        return terapkan_transmisi_atmosfer(L_star_s10, transmission_v)
+        self._scene_photometry = photometry
+        return terapkan_transmisi_atmosfer(photometry['L_star_s10'], transmission_v)
     
     def hitung_visibilitas_naked_eye(self,
                                       luminansi_hilal_nl: float,
@@ -620,8 +669,13 @@ class HilalVisibilityCalculator:
         crumey_result : dict
             Hasil lengkap dari hilal_naked_eye_visibility()
         """
-        if sky_brightness_nl <= 0.0:
-            raise ValueError("Sky brightness harus positif")
+        if not math.isfinite(sky_brightness_nl) or sky_brightness_nl <= 0.0:
+            raise ValueError("Sky brightness harus positif dan finite")
+        if not math.isfinite(luminansi_hilal_nl) or luminansi_hilal_nl < 0:
+            raise ValueError('Luminansi excess harus non-negatif dan finite')
+        if not math.isfinite(F_naked) or F_naked <= 0:
+            raise ValueError('F_naked must be positive and finite')
+        _validated_crescent_area_sr(posisi)
 
         # Panggil model Crumey untuk naked eye
         result = hilal_naked_eye_visibility(
@@ -630,7 +684,7 @@ class HilalVisibilityCalculator:
             elongation_deg=posisi['elongation'],
             moon_sd_deg=float(posisi['moon_semidiameter']),
             F=F_naked,
-            mode='auto',  # otomatis pilih scotopic/combined berdasarkan B
+            mode='auto',  # kurva combined pada seluruh background
         )
 
         rasio_kontras = result['C_obj']
@@ -649,121 +703,56 @@ class HilalVisibilityCalculator:
                                      n_surfaces: int = 6,
                                      central_obstruction: float = 0.0,
                                      observer_age: float = 22.0,
-                                     field_factor: float = 2.4) -> Tuple[float, float, float, float, float]:
+                                     field_factor: float = 2.4,
+                                     pupil_diameter_mm: Optional[float] = None
+                                     ) -> Tuple[float, float, float, float, float]:
+        """Extended-source visibility with the shared Crumey threshold contract.
+
+        Target excess and sky luminance receive the same annulus-aware optical
+        factor g; retinal area is M^2 A. Monocular sqrt(2) corrects the threshold.
+        FM=1 is an optical/observer assumption (Secs. 1.6.4 and 3.2), not Eq. 83
+        and not an empirically established crescent calibration.
+
+        ``observer_age`` affects only the fallback pupil estimate, without an
+        age-dependent sensitivity correction. ``pupil_diameter_mm`` overrides
+        that estimate for a measured or independently modelled twilight pupil.
+        Transmission is per optical surface; obstruction and pupil use mm.
+
+        Returns (L_apparent_nL, B_apparent_nL, C_object, C_threshold, margin_mag).
+        Positive margin means above the model threshold. A centred pupil fully
+        hidden by the secondary shadow gives zero throughput and margin -inf.
+        Invalid physical inputs raise ValueError instead of yielding NaNs.
         """
-        Menghitung visibilitas hilal melalui teleskop.
-        Pipeline langsung: Schaefer (telescope_limit) + Crumey (full_rumus_crumey).
+        if not math.isfinite(sky_brightness_nl) or sky_brightness_nl <= 0:
+            raise ValueError('Sky brightness harus positif dan finite')
+        if not math.isfinite(luminansi_hilal_nl) or luminansi_hilal_nl < 0:
+            raise ValueError('Luminansi excess harus non-negatif dan finite')
+        if not math.isfinite(field_factor) or field_factor <= 0:
+            raise ValueError('field_factor must be positive and finite')
 
-        Pipeline:
-          1. Hitung luas sabit dari elongasi & semidiameter
-          2. Hitung faktor teleskop Schaefer: Fb, Ft, Fp, Fa, Fm
-          3. Kontras increment: C_obj = L_obj / B_sky
-          4. Background apparent: Ba = (Î´min/p)Â² Ã— B / Ft  (Crumey Eq. 66)
-          5. Area efektif retina: A_eff = A_sr Ã— MÂ²
-          6. Threshold Crumey: Ï† = FT Ã— FM Ã— F, C_th = contrast_threshold(A_eff, Ba, Ï†)
-          7. Keputusan: visible = (C_obj > C_th)
-
-        Parameters:
-        -----------
-        luminansi_hilal_nl : float
-            Direct/excess luminance hilal dalam nL (I_0)
-        sky_brightness_nl : float
-            Sky brightness dalam nL (B_0)
-        posisi : Dict[str, float]
-            Dictionary posisi matahari dan bulan
-        aperture : float
-            Diameter aperture teleskop (mm)
-        magnification : float
-            Pembesaran teleskop
-        transmission : float
-            Transmisi per permukaan optik (default: 0.95)
-        n_surfaces : int
-            Jumlah permukaan optik (default: 6)
-        central_obstruction : float
-            Diameter obstruksi pusat (mm, default: 0.0 untuk refraktor)
-        observer_age : float
-            Usia pengamat (tahun, default: 22.0)
-        field_factor : float
-            Personal/kondisi lapangan field factor F (default: 2.4)
-
-        Returns:
-        --------
-        luminansi_hilal_tel_nl : float
-            Luminansi hilal efektif teleskop (I_eff) dalam nL
-        sky_brightness_tel_nl : float
-            Sky brightness efektif teleskop (B_eff) dalam nL
-        rasio_kontras_tel : float
-            Weber contrast objek terhadap latar belakang (C_obj)
-        c_th_tel : float
-            Contrast Threshold berdasarkan Crumey
-        delta_m_tel : float
-            Margin teleskop [mag]: 2.5 Ã— logâ‚â‚€(C_obj / C_th), >0 = detectable
-        """
-        delta_B_obj_nL = luminansi_hilal_nl
-        B_sky_nL = sky_brightness_nl
-
-        # â”€â”€ Langkah 1: Luas sabit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        A_arcmin2 = crescent_area_arcmin2(
-            posisi['elongation'], float(posisi['moon_semidiameter'])
+        A_sr = _validated_crescent_area_sr(posisi)
+        factors = TelescopeVisibilityModel().calculate_factors(
+            D=aperture, Ds=central_obstruction, M=magnification,
+            De=pupil_diameter_mm, age=observer_age, t1=transmission,
+            n=n_surfaces,
         )
-        A_sr = arcmin2_to_sr(A_arcmin2)
-
-        # â”€â”€ Langkah 2: Faktor koreksi teleskop (Schaefer) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        model = TelescopeVisibilityModel()
-        factors = model.calculate_factors(
-            D=aperture,
-            Ds=central_obstruction,
-            M=magnification,
-            age=observer_age,
-            t1=transmission,
-            n=n_surfaces
+        g = factors['surface_brightness_factor']
+        self._scene_telescope = {'optics': factors, 'threshold': None,
+                                'coefficients': threshold_parameters(nL_to_cd_m2(sky_brightness_nl * g))}
+        I_eff = luminansi_hilal_nl * g
+        B_eff = sky_brightness_nl * g
+        C_obj = luminansi_hilal_nl / sky_brightness_nl
+        if A_sr == 0:
+            return I_eff, B_eff, C_obj, float('inf'), float('-inf')
+        threshold = telescopic_extended_threshold(
+            A_sr, nL_to_cd_m2(sky_brightness_nl), aperture / 1000.0,
+            magnification, p=factors['De'] / 1000.0, Ft=factors['Ft'],
+            F=field_factor, FT=math.sqrt(2), FM=1.0, mode='auto',
+            dimming_factor=g,
         )
-
-        # â”€â”€ Langkah 3: Weber contrast (dipertahankan, Crumey Eq. 76) â”€â”€â”€â”€â”€
-        # Hilal = extended source â†’ kontras Weber dipertahankan melalui teleskop
-        if B_sky_nL <= 0:
-            return 0.0, 0.0, float('nan'), float('nan'), float('-inf')
-
-        C_obj = delta_B_obj_nL / B_sky_nL
-
-        # â”€â”€ Langkah 4: Background apparent melalui teleskop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        # Crumey (2014) Eq. 66: Ba = (Î´min/p)Â² Ã— B / Ft
-        d_exit = factors["exit_pupil"]   # exit pupil teleskop [mm]
-        De = factors["De"]               # diameter pupil mata [mm]
-        Ft = factors["Ft"]               # 1/transmittance
-        delta_min = min(d_exit, De)
-        Ba_factor = (delta_min / De) ** 2 / Ft   # Crumey Eq. 66
-        B_sky_eff_nL  = B_sky_nL  * Ba_factor
-        delta_B_obj_eff_nL = delta_B_obj_nL * Ba_factor   # extended source: faktor sama
-
-        B_sky_cd  = nL_to_cd_m2(B_sky_eff_nL)
-        delta_B_obj_cd = nL_to_cd_m2(delta_B_obj_eff_nL)
-
-        # â”€â”€ Langkah 5: Area efektif retina â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        # Magnifikasi memperbesar area angular di retina: A_eff = A Ã— MÂ²
-        A_eff = A_sr * (magnification ** 2)
-
-        # â”€â”€ Langkah 6: Threshold Crumey â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        # Crumey (2014) Sec. 3.2: Ï† = FT Ã— FM Ã— F
-        #   FT = âˆš2 (koreksi monocular, Sec. 1.6.4)
-        #   FM = 1.0 (faktor magnifikasi, Eq. 83 â€” netral untuk extended source)
-        #   F  = field_factor (personal/kondisi lapangan)
-        if B_sky_cd <= 0:
-            return cd_m2_to_nL(delta_B_obj_cd), 0.0, C_obj, float('nan'), float('-inf')
-
-        FT = math.sqrt(2)   # monocular viewing correction (Sec. 1.6.4)
-        FM = 1.0             # magnification factor (Eq. 83)
-        phi = FT * FM * field_factor  # Crumey Sec. 3.2
-        c_th_tel = contrast_threshold(A_eff, B_sky_cd, F=phi, mode='auto') if A_eff > 0 else float('inf')
-
-        # â”€â”€ Langkah 7: Margin visibilitas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        c_th_tel = threshold['C_th']
+        self._scene_telescope['threshold'] = threshold
         delta_m_tel = visibility_margin_mag(C_obj, c_th_tel)
-
-
-        # Konversi balik cd/mÂ² â†’ nL untuk output
-        I_eff = cd_m2_to_nL(delta_B_obj_cd)
-        B_eff = cd_m2_to_nL(B_sky_cd)
-
         return I_eff, B_eff, C_obj, c_th_tel, delta_m_tel
 
     def hitung_visibilitas_pada_waktu(self,
@@ -773,7 +762,13 @@ class HilalVisibilityCalculator:
                                        magnification: float = 50.0,
                                        F_naked: float = 2.5,
                                        field_factor: float = 2.4,
-                                       cached_atm: Optional[Tuple[float, float, float]] = None
+                                       cached_atm: Optional[Tuple[float, float, float]] = None,
+                                       transmission: float = 0.95,
+                                       n_surfaces: int = 6,
+                                       central_obstruction: float = 0.0,
+                                       observer_age: float = 22.0,
+                                       pupil_diameter_mm: Optional[float] = None,
+                                       use_telescope: bool = True,
                                        ) -> Dict[str, Any]:
         """
         Menghitung visibilitas hilal pada waktu tertentu.
@@ -786,6 +781,7 @@ class HilalVisibilityCalculator:
         """
         if cached_atm is not None:
             rh, temperature, pressure = cached_atm
+            validate_atmosphere(rh, temperature, pressure)
         else:
             # Konversi waktu lokal ke UTC untuk API call
             waktu_utc = waktu_local.astimezone(timezone.utc)
@@ -825,26 +821,31 @@ class HilalVisibilityCalculator:
             luminansi_hilal_nl, sky_brightness_nl, posisi, F_naked=F_naked
         )
 
-        # Hitung visibilitas teleskop
-        (luminansi_hilal_tel_nl, sky_brightness_tel_nl,
-         rasio_kontras_tel, c_th_tel, delta_m_tel) = self.hitung_visibilitas_teleskop(
-            luminansi_hilal_nl, sky_brightness_nl, posisi,
-            aperture=aperture,
-            magnification=magnification,
-            field_factor=field_factor
-        )
+        # The same optical configuration is used for every evaluated time.
+        if use_telescope:
+            (luminansi_hilal_tel_nl, sky_brightness_tel_nl,
+             rasio_kontras_tel, c_th_tel, delta_m_tel) = self.hitung_visibilitas_teleskop(
+                luminansi_hilal_nl, sky_brightness_nl, posisi,
+                aperture=aperture, magnification=magnification,
+                transmission=transmission, n_surfaces=n_surfaces,
+                central_obstruction=central_obstruction, observer_age=observer_age,
+                field_factor=field_factor, pupil_diameter_mm=pupil_diameter_mm,
+            )
+        else:
+            luminansi_hilal_tel_nl = sky_brightness_tel_nl = 0.0
+            rasio_kontras_tel = c_th_tel = delta_m_tel = 0.0
 
         # Telescope gain: keuntungan threshold teleskop vs naked eye [mag]
         c_th_ne = crumey_ne['C_th']
-        if c_th_tel > 0 and c_th_ne > 0:
-            telescope_gain = 2.5 * math.log10(c_th_ne / c_th_tel)
-        else:
-            telescope_gain = 0.0
+        telescope_gain = _threshold_gain_mag(c_th_ne, c_th_tel)
 
         return {
             'waktu_local': waktu_local,
             'moon_alt': posisi['moon_alt'],
             'sun_alt': posisi['sun_alt'],
+            'moon_az': posisi['moon_az'],
+            'sun_az': posisi['sun_az'],
+            'moon_width': posisi.get('moon_width'),
             'elongation': posisi['elongation'],
             'phase_angle': posisi['phase_angle'],
             'moon_semidiameter': posisi['moon_semidiameter'],
@@ -866,6 +867,13 @@ class HilalVisibilityCalculator:
             'temperature': temperature,
             'pressure': pressure,
             'crumey_ne_C_th': crumey_ne['C_th'],
+            'model_trace': {
+                'photometry': getattr(self, '_scene_photometry', None),
+                'atmosphere': getattr(self, '_scene_atmosphere', None),
+                'naked_eye': crumey_ne,
+                'naked_eye_coefficients': threshold_parameters(nL_to_cd_m2(sky_brightness_nl)),
+                'telescope': self._scene_telescope if use_telescope else None,
+            },
             'valid': True
         }
     
@@ -878,7 +886,13 @@ class HilalVisibilityCalculator:
                                   field_factor: float = 2.4,
                                   interval_menit: int = 1,
                                   min_moon_alt: float = 2.0,
-                                  start_delay_menit: int = 1) -> Dict[str, Any]:
+                                  start_delay_menit: int = 1,
+                                  transmission: float = 0.95,
+                                  n_surfaces: int = 6,
+                                  central_obstruction: float = 0.0,
+                                  observer_age: float = 22.0,
+                                  pupil_diameter_mm: Optional[float] = None,
+                                  use_telescope: bool = True) -> Dict[str, Any]:
         """
         Loop dari sunset hingga bulan mendekati horizon untuk mencari
         waktu optimal (delta_m maksimum).
@@ -903,6 +917,13 @@ class HilalVisibilityCalculator:
             raise ValueError('interval_menit must be positive and finite')
         if not math.isfinite(start_delay_menit) or start_delay_menit < 0:
             raise ValueError('start_delay_menit must be nonnegative and finite')
+        if not math.isfinite(min_moon_alt) or not (0 <= min_moon_alt <= 90):
+            raise ValueError('min_moon_alt must be finite and in [0, 90] degrees')
+        telescope_config = _telescope_configuration(
+            aperture, magnification, transmission=transmission, n_surfaces=n_surfaces,
+            central_obstruction=central_obstruction, observer_age=observer_age,
+            field_factor=field_factor, pupil_diameter_mm=pupil_diameter_mm,
+        )
         print(f"\n  Mencari visibilitas optimal (interval: {interval_menit} menit, "
               f"start delay: {start_delay_menit} menit)...")
 
@@ -959,8 +980,8 @@ class HilalVisibilityCalculator:
             rh, temperature, pressure = self._atmosfer_pada_waktu(atmosphere_window, waktu_utc)
 
             result = self.hitung_visibilitas_pada_waktu(
-                current_time, observing_location, aperture, magnification,
-                F_naked=F_naked, field_factor=field_factor,
+                current_time, observing_location, **telescope_config,
+                F_naked=F_naked, use_telescope=use_telescope,
                 cached_atm=(rh, temperature, pressure)
             )
 
@@ -976,7 +997,7 @@ class HilalVisibilityCalculator:
                 best_result_ne = result
 
             # Track best telescope
-            if best_result_tel is None or result['delta_m_tel'] > best_delta_m_tel:
+            if use_telescope and (best_result_tel is None or result['delta_m_tel'] > best_delta_m_tel):
                 best_delta_m_tel = result['delta_m_tel']
                 best_result_tel = result
 
@@ -1048,7 +1069,10 @@ class HilalVisibilityCalculator:
             if best_result_tel:
                 peak_times.append(best_result_tel['waktu_local'])
 
-            refine_start = min(peak_times) - timedelta(minutes=2)
+            refine_start = max(
+                sunset_local + timedelta(minutes=start_delay_menit),
+                min(peak_times) - timedelta(minutes=2),
+            )
             refine_end = max(peak_times) + timedelta(minutes=2)
             refine_step = timedelta(seconds=15)
 
@@ -1064,18 +1088,18 @@ class HilalVisibilityCalculator:
                     waktu_utc_r = waktu_utc_r.replace(tzinfo=timezone.utc)
                 rh_r, temp_r, pres_r = self._atmosfer_pada_waktu(atmosphere_window, waktu_utc_r)
                 result_r = self.hitung_visibilitas_pada_waktu(
-                    t_refine, observing_location, aperture, magnification,
-                    F_naked=F_naked, field_factor=field_factor,
+                    t_refine, observing_location, **telescope_config,
+                    F_naked=F_naked, use_telescope=use_telescope,
                     cached_atm=(rh_r, temp_r, pres_r)
                 )
-                if result_r['valid']:
+                if result_r['valid'] and result_r['moon_alt'] >= min_moon_alt:
                     if best_result_ne is None or result_r['delta_m_ne'] > best_delta_m_ne:
                         best_delta_m_ne = result_r['delta_m_ne']
                         best_result_ne = result_r
                         print(f"    ^ NE peak refined: "
                               f"{t_refine.strftime('%H:%M:%S')} "
                               f"dm={result_r['delta_m_ne']:+.4f}")
-                    if best_result_tel is None or result_r['delta_m_tel'] > best_delta_m_tel:
+                    if use_telescope and (best_result_tel is None or result_r['delta_m_tel'] > best_delta_m_tel):
                         best_delta_m_tel = result_r['delta_m_tel']
                         best_result_tel = result_r
                         print(f"    ^ Tel peak refined: "
@@ -1152,6 +1176,11 @@ class HilalVisibilityCalculator:
         Dict[str, Any]
             Dictionary berisi seluruh hasil perhitungan
         """
+        if mode.lower() not in {'sunset', 'optimal'}:
+            raise ValueError("mode must be 'sunset' or 'optimal'")
+        if not math.isfinite(F_naked) or F_naked <= 0:
+            raise ValueError('F_naked must be positive and finite')
+        telescope_config = _telescope_configuration(aperture, magnification, **telescope_kwargs)
         print("Menjalankan perhitungan visibilitas hilal...")
 
         # Langkah 1: Hitung ijtima
@@ -1183,32 +1212,24 @@ class HilalVisibilityCalculator:
             (luminansi_hilal_tel_nl, sky_brightness_tel_nl,
              rasio_kontras_tel, c_th_tel, delta_m_tel) = self.hitung_visibilitas_teleskop(
                 luminansi_hilal_nl, sky_brightness_nl, posisi,
-                aperture=aperture,
-                magnification=magnification,
-                **telescope_kwargs
+                **telescope_config
             )
             # Telescope gain: keuntungan threshold teleskop vs naked eye [mag]
             c_th_ne = crumey_ne['C_th']
-            if c_th_tel > 0 and c_th_ne > 0:
-                telescope_gain = 2.5 * math.log10(c_th_ne / c_th_tel)
-            else:
-                telescope_gain = 0.0
+            telescope_gain = _threshold_gain_mag(c_th_ne, c_th_tel)
         else:
             luminansi_hilal_tel_nl = sky_brightness_tel_nl = 0.0
             rasio_kontras_tel = c_th_tel = delta_m_tel = 0.0
             telescope_gain = 0.0
 
         # Simpan parameter teleskop yang digunakan
-        self.hasil['tel_params'] = {
-            'aperture': aperture,
-            'magnification': magnification,
-            'central_obstruction': telescope_kwargs.get('central_obstruction', 0.0),
-            'transmission': telescope_kwargs.get('transmission', 0.95),
-            'n_surfaces': telescope_kwargs.get('n_surfaces', 6),
-            'observer_age': telescope_kwargs.get('observer_age', 22.0),
-            'field_factor': telescope_kwargs.get('field_factor', 2.4),
-        }
+        self.hasil['tel_params'] = dict(telescope_config)
         self.hasil['F_naked'] = F_naked
+        self.hasil['use_telescope'] = use_telescope
+        self.hasil['scan_params'] = {
+            'interval_menit': interval_menit, 'min_moon_alt': min_moon_alt,
+            'start_delay_menit': start_delay_menit, 'refinement_seconds': 15,
+        }
 
         # Simpan semua hasil termasuk data posisi lengkap
         self.hasil.update({
@@ -1240,6 +1261,13 @@ class HilalVisibilityCalculator:
             'crumey_ne_C_th': crumey_ne['C_th'],
             'crumey_ne_regime': crumey_ne['regime'],
             'crumey_ne_A_arcmin2': crumey_ne['A_arcmin2'],
+            'model_trace': {
+                'photometry': getattr(self, '_scene_photometry', None),
+                'atmosphere': getattr(self, '_scene_atmosphere', None),
+                'naked_eye': crumey_ne,
+                'naked_eye_coefficients': threshold_parameters(nL_to_cd_m2(sky_brightness_nl)),
+                'telescope': self._scene_telescope if use_telescope else None,
+            },
         })
         
         # Langkah 8: Cari visibilitas optimal (jika mode = "optimal")
@@ -1249,13 +1277,12 @@ class HilalVisibilityCalculator:
             hasil_optimal = self.cari_visibilitas_optimal(
                 sunset_local=sunset_local,
                 observing_location=observing_location,
-                aperture=aperture,
-                magnification=magnification,
+                **telescope_config,
                 F_naked=F_naked,
-                field_factor=telescope_kwargs.get('field_factor', 2.4),
                 interval_menit=interval_menit,
                 min_moon_alt=min_moon_alt,
-                start_delay_menit=start_delay_menit
+                start_delay_menit=start_delay_menit,
+                use_telescope=use_telescope,
             )
             
             self.hasil.update({
@@ -1564,595 +1591,21 @@ class HilalVisibilityCalculator:
         plt.close(fig)
         return True
 
-    def _excel_styles(self):
-        """Mengembalikan dictionary style untuk Excel."""
-        return {
-            'header_font': Font(name='Segoe UI', bold=True, size=12, color='FFFFFF'),
-            'header_fill': PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid'),
-            'section_font': Font(name='Segoe UI', bold=True, size=11, color='FFFFFF'),
-            'section_fill': PatternFill(start_color='2E75B6', end_color='2E75B6', fill_type='solid'),
-            'data_font': Font(name='Segoe UI', size=11),
-            'data_font_bold': Font(name='Segoe UI', size=11, bold=True),
-            'thin_border': Border(
-                left=Side(style='thin', color='BDD7EE'),
-                right=Side(style='thin', color='BDD7EE'),
-                top=Side(style='thin', color='BDD7EE'),
-                bottom=Side(style='thin', color='BDD7EE')
-            ),
-            'align_left': Alignment(horizontal='left', vertical='center'),
-            'align_center': Alignment(horizontal='center', vertical='center'),
-            'green_fill': PatternFill(start_color='C6E0B4', end_color='C6E0B4', fill_type='solid'),
-            'red_fill': PatternFill(start_color='F8CBAD', end_color='F8CBAD', fill_type='solid'),
-            'light_green_fill': PatternFill(start_color='E2F0D9', end_color='E2F0D9', fill_type='solid'),
-        }
-
-    def _excel_write_section_header(self, ws, row, title, styles, num_cols=2):
-        """Menulis header seksi dengan formatting."""
-        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=num_cols)
-        cell = ws.cell(row=row, column=1, value=title)
-        cell.font = styles['section_font']
-        cell.fill = styles['section_fill']
-        cell.alignment = styles['align_center']
-        cell.border = styles['thin_border']
-        for c in range(2, num_cols + 1):
-            ws.cell(row=row, column=c).border = styles['thin_border']
-            ws.cell(row=row, column=c).fill = styles['section_fill']
-        return row + 1
-
-    def _excel_write_data_row(self, ws, row, label, value, styles,
-                               bold=False, is_status=False, status_positive=False,
-                               merge_to_col=None):
-        """Menulis satu baris data label-value, opsional merge B hingga kolom tertentu."""
-        cell_label = ws.cell(row=row, column=1, value=label)
-        cell_label.font = styles['data_font_bold'] if bold else styles['data_font']
-        cell_label.alignment = styles['align_left']
-        cell_label.border = styles['thin_border']
-
-        if merge_to_col and merge_to_col > 2:
-            ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=merge_to_col)
-
-        cell_value = ws.cell(row=row, column=2, value=value)
-        cell_value.font = styles['data_font_bold'] if bold else styles['data_font']
-        if is_status:
-            cell_value.alignment = styles['align_center']
-            cell_value.fill = styles['green_fill'] if status_positive else styles['red_fill']
-        else:
-            cell_value.alignment = styles['align_left']
-        cell_value.border = styles['thin_border']
-
-        if merge_to_col:
-            for c in range(3, merge_to_col + 1):
-                ws.cell(row=row, column=c).border = styles['thin_border']
-
-        return row + 1
-
-    def _excel_write_comparison_row(self, ws, row, label, val_sunset, val_optimal, styles,
-                                     bold=False, is_status=False,
-                                     status_pos_sunset=False, status_pos_opt=False):
-        """Menulis baris perbandingan 3 kolom: label | saat sunset | saat optimal."""
-        font = styles['data_font_bold'] if bold else styles['data_font']
-
-        cell_label = ws.cell(row=row, column=1, value=label)
-        cell_label.font = font
-        cell_label.alignment = styles['align_left']
-        cell_label.border = styles['thin_border']
-
-        cell_sunset = ws.cell(row=row, column=2, value=val_sunset)
-        cell_sunset.font = font
-        cell_sunset.alignment = styles['align_center']
-        cell_sunset.border = styles['thin_border']
-
-        cell_opt = ws.cell(row=row, column=3, value=val_optimal)
-        cell_opt.font = font
-        cell_opt.alignment = styles['align_center']
-        cell_opt.border = styles['thin_border']
-
-        if is_status:
-            cell_sunset.fill = styles['green_fill'] if status_pos_sunset else styles['red_fill']
-            if val_optimal != '-':
-                cell_opt.fill = styles['green_fill'] if status_pos_opt else styles['red_fill']
-
-        return row + 1
-
-    def _write_ringkasan_sheet(self, ws, styles):
-        """Menulis sheet Ringkasan ke worksheet dengan kolom terpisah sunset vs optimal."""
-        ws.sheet_properties.tabColor = '2F5496'
-        ws.column_dimensions['A'].width = 40
-        ws.column_dimensions['B'].width = 30
-        ws.column_dimensions['C'].width = 30
-
-        is_optimal = self.hasil.get('mode') == 'optimal'
-        nc = 3  # jumlah kolom
-
-        # Style untuk sub-header kolom perbandingan
-        sub_fill = PatternFill(start_color='D6E4F0', end_color='D6E4F0', fill_type='solid')
-        sub_font = Font(name='Segoe UI', bold=True, size=10, color='1F4E79')
-
-        # Title
-        ws.merge_cells('A1:C1')
-        title_cell = ws.cell(row=1, column=1, value='HASIL PERHITUNGAN VISIBILITAS HILAL')
-        title_cell.font = Font(name='Segoe UI', bold=True, size=16, color='FFFFFF')
-        title_cell.fill = styles['header_fill']
-        title_cell.alignment = Alignment(horizontal='center', vertical='center')
-        for c in range(2, nc + 1):
-            ws.cell(row=1, column=c).fill = styles['header_fill']
-        ws.row_dimensions[1].height = 40
-
-        # Shortcut helpers
-        wsh = lambda r, t: self._excel_write_section_header(ws, r, t, styles, num_cols=nc)
-        wdr = lambda r, l, v, **kw: self._excel_write_data_row(ws, r, l, v, styles, merge_to_col=nc, **kw)
-        wcr = lambda r, l, vs, vo, **kw: self._excel_write_comparison_row(ws, r, l, vs, vo, styles, **kw)
-
-        def write_sub_header(r):
-            """Menulis sub-header kolom perbandingan."""
-            headers = ['Parameter', 'Saat Sunset', 'Saat Optimal' if is_optimal else '-']
-            for ci, h in enumerate(headers, 1):
-                cell = ws.cell(row=r, column=ci, value=h)
-                cell.font = sub_font
-                cell.alignment = styles['align_center']
-                cell.border = styles['thin_border']
-                cell.fill = sub_fill
-            return r + 1
-
-        row = 3
-        na = '-'
-
-        # ===================== INFORMASI LOKASI =====================
-        row = wsh(row, 'ðŸ“ INFORMASI LOKASI')
-        row = wdr(row, 'Nama Tempat', self.nama_tempat)
-        row = wdr(row, 'Lintang (Â°)', self.lintang)
-        row = wdr(row, 'Bujur (Â°)', self.bujur)
-        row = wdr(row, 'Elevasi (m)', self.elevasi)
-        row = wdr(row, 'Timezone', self.timezone_str)
-        row = wdr(row, 'Bulan/Tahun Hijri', f"{self.bulan_hijri}/{self.tahun_hijri}")
-        row = wdr(row, 'Mode Perhitungan', self.hasil.get('mode', 'sunset').upper())
-        row += 1
-
-        # ===================== WAKTU =====================
-        row = wsh(row, 'ðŸ• WAKTU')
-        if 'ijtima_utc' in self.hasil:
-            row = wdr(row, 'Ijtima UTC', self.hasil['ijtima_utc'].strftime('%Y-%m-%d %H:%M:%S'))
-            row = wdr(row, 'Ijtima Lokal', self.hasil['ijtima_local'].strftime('%Y-%m-%d %H:%M:%S'))
-        if 'tanggal_pengamatan' in self.hasil:
-            row = wdr(row, 'Tanggal Pengamatan', self.hasil['tanggal_pengamatan'].strftime('%Y-%m-%d'))
-        if 'sunset_utc' in self.hasil:
-            row = wdr(row, 'Sunset UTC', self.hasil['sunset_utc'].strftime('%Y-%m-%d %H:%M:%S'))
-            row = wdr(row, 'Sunset Lokal', self.hasil['sunset_local'].strftime('%Y-%m-%d %H:%M:%S'))
-        row += 1
-
-        # ===================== DATA ATMOSFER (Saat Sunset) =====================
-        src_short = self.SUMBER_ATMOSFER_LABEL.get(self.sumber_atmosfer, self.sumber_atmosfer.upper()).split(' ')[0]
-        row = wsh(row, 'ðŸŒ¡ï¸ DATA ATMOSFER (Saat Sunset)')
-        row = wdr(row, 'Sumber Data', self.SUMBER_ATMOSFER_LABEL.get(self.sumber_atmosfer, self.sumber_atmosfer))
-        bias_t = self.hasil.get('bias_t', 0.0)
-        bias_rh = self.hasil.get('bias_rh', 0.0)
-        if 'rh' in self.hasil:
-            if bias_t != 0.0 or bias_rh != 0.0:
-                row = wdr(row, f'Suhu {src_short} Raw (Â°C)', f"{self.hasil.get('temperature_raw', 0):.2f}")
-                row = wdr(row, f'Suhu Terkoreksi (Â°C) [bias={bias_t:+.1f}Â°C]', f"{self.hasil['temperature']:.2f}")
-                row = wdr(row, f'RH {src_short} Raw (%)', f"{self.hasil.get('rh_raw', 0):.2f}")
-                row = wdr(row, f'RH Terkoreksi (%) [bias={bias_rh:+.1f}%]', f"{self.hasil['rh']:.2f}")
-            else:
-                row = wdr(row, 'Kelembapan Relatif / RH (%)', f"{self.hasil['rh']:.2f}")
-                row = wdr(row, 'Suhu / T (Â°C)', f"{self.hasil['temperature']:.2f}")
-        if 'pressure' in self.hasil:
-            row = wdr(row, 'Tekanan Udara / P (mbar)', f"{self.hasil['pressure']:.2f}")
-        if 'k_v' in self.hasil:
-            row = wdr(row, 'Koefisien Ekstingsi k_v (mag/airmass)', f"{self.hasil['k_v']:.4f}")
-        if 'extinction_mag_v' in self.hasil:
-            row = wdr(row, 'extinction_mag_v (mag)', f"{self.hasil['extinction_mag_v']:.4f}")
-            row = wdr(row, 'transmission_v', f"{self.hasil['transmission_v']:.6e}")
-        row += 1
-
-        # ===================== POSISI MATAHARI (Saat Sunset) =====================
-        row = wsh(row, 'â˜€ï¸ POSISI MATAHARI (Saat Sunset)')
-        if 'sun_alt' in self.hasil:
-            row = wdr(row, 'Altitude Matahari', deg_to_dms(self.hasil['sun_alt']))
-            row = wdr(row, 'Altitude Matahari (Â°)', f"{self.hasil['sun_alt']:.6f}")
-            row = wdr(row, 'Azimuth Matahari', deg_to_dms(self.hasil['sun_az']))
-            row = wdr(row, 'Azimuth Matahari (Â°)', f"{self.hasil['sun_az']:.6f}")
-        row += 1
-
-        # ===================== POSISI BULAN (Saat Sunset) =====================
-        row = wsh(row, 'ðŸŒ™ POSISI BULAN (Saat Sunset)')
-        if 'moon_alt' in self.hasil:
-            row = wdr(row, 'Altitude Bulan', deg_to_dms(self.hasil['moon_alt']))
-            row = wdr(row, 'Altitude Bulan (Â°)', f"{self.hasil['moon_alt']:.6f}")
-            row = wdr(row, 'Azimuth Bulan', deg_to_dms(self.hasil['moon_az']))
-            row = wdr(row, 'Azimuth Bulan (Â°)', f"{self.hasil['moon_az']:.6f}")
-        if 'elongation' in self.hasil:
-            row = wdr(row, 'Elongasi Toposentrik', deg_to_dms(self.hasil['elongation']))
-            row = wdr(row, 'Elongasi Toposentrik (Â°)', f"{self.hasil['elongation']:.6f}")
-        if 'phase_angle' in self.hasil:
-            row = wdr(row, 'Phase Angle', deg_to_dms(self.hasil['phase_angle']))
-            row = wdr(row, 'Phase Angle (Â°)', f"{self.hasil['phase_angle']:.6f}")
-        if 'moon_semidiameter' in self.hasil:
-            row = wdr(row, 'Semidiameter Bulan', deg_to_dms(float(self.hasil['moon_semidiameter'])))
-            row = wdr(row, 'Semidiameter Bulan (Â°)', f"{float(self.hasil['moon_semidiameter']):.6f}")
-            row = wdr(row, 'Jarak Bulan Toposentrik (km)', f"{self.hasil['moon_distance_km']:.3f}")
-        if 'moon_width' in self.hasil:
-            row = wdr(row, 'Lebar Sabit Bulan (arcmin)', f"{self.hasil['moon_width']*60.0:.6f}")
-        row += 1
-
-        # ===================== VISIBILITAS NAKED EYE =====================
-        row = wsh(row, 'ðŸ‘ï¸ VISIBILITAS HILAL NAKED EYE')
-        row = write_sub_header(row)
-
-        opt_ne = self.hasil.get('optimal_result_ne') if is_optimal else None
-        has_opt_ne = opt_ne is not None and opt_ne.get('valid', False)
-
-        sunset_time = self.hasil['sunset_local'].strftime('%H:%M:%S') if 'sunset_local' in self.hasil else na
-
-        row = wcr(row, 'Waktu', sunset_time,
-                  opt_ne['waktu_local'].strftime('%H:%M:%S') if has_opt_ne else na)
-
-        row = wcr(row, 'Altitude Bulan (Â°)',
-                  f"{self.hasil['moon_alt']:.4f}" if 'moon_alt' in self.hasil else na,
-                  f"{opt_ne['moon_alt']:.4f}" if has_opt_ne else na)
-
-        row = wcr(row, 'Altitude Matahari (Â°)',
-                  f"{self.hasil['sun_alt']:.4f}" if 'sun_alt' in self.hasil else na,
-                  f"{opt_ne['sun_alt']:.4f}" if has_opt_ne else na)
-
-        row = wcr(row, 'Elongasi (Â°)',
-                  f"{self.hasil['elongation']:.4f}" if 'elongation' in self.hasil else na,
-                  f"{opt_ne['elongation']:.4f}" if has_opt_ne else na)
-
-        row = wcr(row, 'Semidiameter Toposentrik (deg)',
-                  f"{self.hasil['moon_semidiameter']:.8f}" if 'moon_semidiameter' in self.hasil else na,
-                  f"{opt_ne['moon_semidiameter']:.8f}" if has_opt_ne else na)
-
-        row = wcr(row, 'RH (%)',
-                  f"{self.hasil['rh']:.2f}" if 'rh' in self.hasil else na,
-                  f"{opt_ne['rh']:.2f}" if has_opt_ne and opt_ne.get('rh') is not None else na)
-
-        row = wcr(row, 'Suhu (Â°C)',
-                  f"{self.hasil['temperature']:.2f}" if 'temperature' in self.hasil else na,
-                  f"{opt_ne['temperature']:.2f}" if has_opt_ne and opt_ne.get('temperature') is not None else na)
-
-        row = wcr(row, 'Sky Brightness (nL)',
-                  f"{self.hasil['sky_brightness_nl']:.4e}" if 'sky_brightness_nl' in self.hasil else na,
-                  f"{opt_ne['sky_brightness_nl']:.4e}" if has_opt_ne else na)
-
-        row = wcr(row, 'Luminansi Hilal (nL)',
-                  f"{self.hasil['luminansi_hilal_nl']:.4e}" if 'luminansi_hilal_nl' in self.hasil else na,
-                  f"{opt_ne['luminansi_hilal_nl']:.4e}" if has_opt_ne else na)
-
-        row = wcr(row, 'Koefisien Ekstingsi k_v (mag/airmass)',
-                  f"{self.hasil['k_v']:.4f}" if 'k_v' in self.hasil else na,
-                  f"{opt_ne['k_v']:.4f}" if has_opt_ne else na)
-
-        row = wcr(row, 'extinction_mag_v (mag)',
-                  f"{self.hasil['extinction_mag_v']:.4f}" if 'extinction_mag_v' in self.hasil else na,
-                  f"{opt_ne['extinction_mag_v']:.4f}" if has_opt_ne else na)
-
-        row = wcr(row, 'transmission_v',
-                  f"{self.hasil['transmission_v']:.6e}" if 'transmission_v' in self.hasil else na,
-                  f"{opt_ne['transmission_v']:.6e}" if has_opt_ne else na)
-
-        row = wcr(row, 'Weber Contrast (C_obj)',
-                  f"{self.hasil['rasio_kontras_ne']:.4e}" if 'rasio_kontras_ne' in self.hasil else na,
-                  f"{opt_ne['rasio_kontras_ne']:.4e}" if has_opt_ne else na)
-
-        row = wcr(row, 'Threshold Crumey (C_th)',
-                  f"{self.hasil['crumey_ne_C_th']:.4e}" if 'crumey_ne_C_th' in self.hasil else na,
-                  f"{opt_ne.get('crumey_ne_C_th', 0):.4e}" if has_opt_ne and opt_ne.get('crumey_ne_C_th') is not None else na)
-
-        row = wcr(row, 'Regime',
-                  self.hasil.get('crumey_ne_regime', na),
-                  opt_ne.get('crumey_ne_regime', na) if has_opt_ne else na)
-
-        row = wcr(row, 'Luas Sabit (arcminÂ²)',
-                  f"{self.hasil['crumey_ne_A_arcmin2']:.4f}" if 'crumey_ne_A_arcmin2' in self.hasil else na,
-                  f"{opt_ne.get('crumey_ne_A_arcmin2', 0):.4f}" if has_opt_ne and opt_ne.get('crumey_ne_A_arcmin2') is not None else na)
-
-        row = wcr(row, 'Visib. Margin (D_m)',
-                  f"{self.hasil['delta_m_ne']:.4f}" if 'delta_m_ne' in self.hasil else na,
-                  f"{opt_ne['delta_m_ne']:.4f}" if has_opt_ne else na)
-
-        # Status NE
-        is_sunset_ne = self.hasil.get('delta_m_ne', -1) > 0
-        is_opt_ne_vis = has_opt_ne and opt_ne.get('delta_m_ne', -1) > 0
-        row = wcr(row, 'Status',
-                  "TERLIHAT" if is_sunset_ne else "TIDAK TERLIHAT",
-                  "TERLIHAT" if is_opt_ne_vis else ("TIDAK TERLIHAT" if has_opt_ne else na),
-                  bold=True, is_status=True,
-                  status_pos_sunset=is_sunset_ne, status_pos_opt=is_opt_ne_vis)
-
-        # Durasi visibilitas (hanya bermakna pada mode optimal)
-        if is_optimal:
-            dur_ne = self.hasil.get('visibility_duration_ne', 0)
-            row = wcr(row, 'Durasi Visibilitas (menit)', na, str(dur_ne))
-            # Window visibilitas kontinu terpanjang
-            ws_ne = self.hasil.get('best_window_start_ne')
-            we_ne = self.hasil.get('best_window_end_ne')
-            if ws_ne and we_ne:
-                window_str = f"{ws_ne.strftime('%H:%M:%S')} - {we_ne.strftime('%H:%M:%S')}"
-            else:
-                window_str = '-'
-            row = wcr(row, 'Window Visibilitas', na, window_str)
-
-        # Interpretasi keseluruhan
-        overall_ne = is_sunset_ne or is_opt_ne_vis
-        if overall_ne:
-            row = wdr(row, 'Interpretasi', 'âœ“ Hilal BERPOTENSI terlihat dengan mata telanjang', bold=True)
-        else:
-            row = wdr(row, 'Interpretasi', 'âœ— Hilal SULIT terlihat dengan mata telanjang', bold=True)
-        row += 1
-
-        # ===================== VISIBILITAS TELESKOP =====================
-        row = wsh(row, 'ðŸ”­ VISIBILITAS HILAL TELESKOP')
-        row = write_sub_header(row)
-
-        opt_tel = self.hasil.get('optimal_result_tel') if is_optimal else None
-        has_opt_tel = opt_tel is not None and opt_tel.get('valid', False)
-
-        row = wcr(row, 'Waktu', sunset_time,
-                  opt_tel['waktu_local'].strftime('%H:%M:%S') if has_opt_tel else na)
-
-        row = wcr(row, 'Altitude Bulan (Â°)',
-                  f"{self.hasil['moon_alt']:.4f}" if 'moon_alt' in self.hasil else na,
-                  f"{opt_tel['moon_alt']:.4f}" if has_opt_tel else na)
-
-        row = wcr(row, 'Altitude Matahari (Â°)',
-                  f"{self.hasil['sun_alt']:.4f}" if 'sun_alt' in self.hasil else na,
-                  f"{opt_tel['sun_alt']:.4f}" if has_opt_tel else na)
-
-        row = wcr(row, 'Elongasi (Â°)',
-                  f"{self.hasil['elongation']:.4f}" if 'elongation' in self.hasil else na,
-                  f"{opt_tel['elongation']:.4f}" if has_opt_tel else na)
-
-        row = wcr(row, 'Semidiameter Toposentrik (deg)',
-                  f"{self.hasil['moon_semidiameter']:.8f}" if 'moon_semidiameter' in self.hasil else na,
-                  f"{opt_tel['moon_semidiameter']:.8f}" if has_opt_tel else na)
-
-        row = wcr(row, 'RH (%)',
-                  f"{self.hasil['rh']:.2f}" if 'rh' in self.hasil else na,
-                  f"{opt_tel['rh']:.2f}" if has_opt_tel and opt_tel.get('rh') is not None else na)
-
-        row = wcr(row, 'Suhu (Â°C)',
-                  f"{self.hasil['temperature']:.2f}" if 'temperature' in self.hasil else na,
-                  f"{opt_tel['temperature']:.2f}" if has_opt_tel and opt_tel.get('temperature') is not None else na)
-
-        row = wcr(row, 'Luminansi Hilal Teleskop (nL)',
-                  f"{self.hasil['luminansi_hilal_tel_nl']:.4e}" if 'luminansi_hilal_tel_nl' in self.hasil else na,
-                  f"{opt_tel.get('luminansi_hilal_tel_nl', 0):.4e}" if has_opt_tel and 'luminansi_hilal_tel_nl' in opt_tel else na)
-
-        row = wcr(row, 'Sky Brightness Teleskop (nL)',
-                  f"{self.hasil['sky_brightness_tel_nl']:.4e}" if 'sky_brightness_tel_nl' in self.hasil else na,
-                  f"{opt_tel.get('sky_brightness_tel_nl', 0):.4e}" if has_opt_tel and 'sky_brightness_tel_nl' in opt_tel else na)
-
-        for key, label, fmt in (
-            ('k_v', 'Koefisien Ekstingsi k_v (mag/airmass)', '.4f'),
-            ('extinction_mag_v', 'extinction_mag_v (mag)', '.4f'),
-            ('transmission_v', 'transmission_v', '.6e'),
-        ):
-            row = wcr(row, label,
-                      format(self.hasil[key], fmt) if key in self.hasil else na,
-                      format(opt_tel[key], fmt) if has_opt_tel else na)
-
-        row = wcr(row, 'Weber Contrast (C_obj)',
-                  f"{self.hasil['rasio_kontras_tel']:.4e}" if 'rasio_kontras_tel' in self.hasil else na,
-                  f"{opt_tel['rasio_kontras_tel']:.4e}" if has_opt_tel else na)
-
-        if 'c_th_tel' in self.hasil:
-            row = wcr(row, 'Threshold Crumey (C_th)',
-                      f"{self.hasil['c_th_tel']:.4e}",
-                      f"{opt_tel['c_th_tel']:.4e}" if has_opt_tel and 'c_th_tel' in opt_tel else na)
-
-        row = wcr(row, 'Visib. Margin (D_m)',
-                  f"{self.hasil['delta_m_tel']:.4f}" if 'delta_m_tel' in self.hasil else na,
-                  f"{opt_tel['delta_m_tel']:.4f}" if has_opt_tel else na)
-
-        row = wcr(row, 'Telescope Gain (mag)',
-                  f"{self.hasil['telescope_gain']:+.4f}" if 'telescope_gain' in self.hasil else na,
-                  f"{opt_tel['telescope_gain']:+.4f}" if has_opt_tel and 'telescope_gain' in opt_tel else na)
-
-        # Status Teleskop
-        is_sunset_tel = self.hasil.get('delta_m_tel', -1) > 0
-        is_opt_tel_vis = has_opt_tel and opt_tel.get('delta_m_tel', -1) > 0
-        row = wcr(row, 'Status',
-                  "TERLIHAT" if is_sunset_tel else "TIDAK TERLIHAT",
-                  "TERLIHAT" if is_opt_tel_vis else ("TIDAK TERLIHAT" if has_opt_tel else na),
-                  bold=True, is_status=True,
-                  status_pos_sunset=is_sunset_tel, status_pos_opt=is_opt_tel_vis)
-
-        # Durasi dan timesteps (hanya mode optimal)
-        if is_optimal:
-            dur_tel = self.hasil.get('visibility_duration_tel', 0)
-            row = wcr(row, 'Durasi Visibilitas (menit)', na, str(dur_tel))
-            # Window visibilitas kontinu terpanjang
-            ws_tel = self.hasil.get('best_window_start_tel')
-            we_tel = self.hasil.get('best_window_end_tel')
-            if ws_tel and we_tel:
-                window_str_tel = f"{ws_tel.strftime('%H:%M:%S')} - {we_tel.strftime('%H:%M:%S')}"
-            else:
-                window_str_tel = '-'
-            row = wcr(row, 'Window Visibilitas', na, window_str_tel)
-            row = wcr(row, 'Total Timesteps', na, str(self.hasil.get('total_timesteps', 0)))
-
-        # Interpretasi keseluruhan
-        overall_tel = is_sunset_tel or is_opt_tel_vis
-        if overall_tel:
-            row = wdr(row, 'Interpretasi', 'âœ“ Hilal TERDETEKSI dengan teleskop', bold=True)
-        else:
-            row = wdr(row, 'Interpretasi', 'âœ— Hilal SULIT terdeteksi dengan teleskop', bold=True)
-
-        ws.freeze_panes = 'A2'
-
-    def _write_timestep_sheet(self, ws, styles):
-        """Menulis sheet Timestep Data ke worksheet."""
-        ws.sheet_properties.tabColor = '548235'
-
-        timestep_headers = [
-            'No', 'Waktu Lokal', 'Moon Alt (Â°)', 'Sun Alt (Â°)',
-            'Elongasi (Â°)', 'RH (%)', 'T (Â°C)',
-            'Sky Brightness (nL)', 'Luminansi Hilal (nL)', 'k_v (mag/airmass)',
-            'extinction_mag_v (mag)', 'transmission_v',
-            'Î”m Naked Eye', 'Margin Teleskop', 'Telescope Gain (mag)',
-            'Kontras NE', 'C_obj Teleskop', 'C_th Teleskop',
-            'Semidiameter Bulan (deg)', 'Jarak Bulan (km)',
-        ]
-
-        for col_idx, header in enumerate(timestep_headers, 1):
-            cell = ws.cell(row=1, column=col_idx, value=header)
-            cell.font = styles['header_font']
-            cell.fill = styles['header_fill']
-            cell.alignment = styles['align_center']
-            cell.border = styles['thin_border']
-
-        all_results = self.hasil.get('all_timestep_results', [])
-        if all_results:
-            for i, r in enumerate(all_results, 1):
-                row_data = [
-                    i,
-                    r['waktu_local'].strftime('%H:%M:%S') if r.get('waktu_local') else '',
-                    round(r.get('moon_alt', 0), 4),
-                    round(r.get('sun_alt', 0), 4),
-                    round(r.get('elongation', 0), 4) if r.get('valid') else '',
-                    round(r.get('rh', 0), 2) if r.get('rh') is not None else '',
-                    round(r.get('temperature', 0), 2) if r.get('temperature') is not None else '',
-                    f"{r.get('sky_brightness_nl', 0):.4e}" if r.get('valid') else '',
-                    f"{r.get('luminansi_hilal_nl', 0):.4e}" if r.get('valid') else '',
-                    round(r.get('k_v', 0), 4) if r.get('valid') else '',
-                    round(r['extinction_mag_v'], 4) if r.get('valid') else '',
-                    r['transmission_v'] if r.get('valid') else '',
-                    round(r.get('delta_m_ne', 0), 4) if r.get('valid') else '',
-                    round(r.get('delta_m_tel', 0), 4) if r.get('valid') else '',
-                    round(r.get('telescope_gain', 0), 4) if r.get('valid') else '',
-                    f"{r.get('rasio_kontras_ne', 0):.4e}" if r.get('valid') else '',
-                    f"{r.get('rasio_kontras_tel', 0):.4e}" if r.get('valid') else '',
-                    f"{r.get('c_th_tel', 0):.4e}" if r.get('valid') and 'c_th_tel' in r else '',
-                    r['moon_semidiameter'] if r.get('valid') else '',
-                    r['moon_distance_km'] if r.get('valid') else '',
-                ]
-
-                for col_idx, val in enumerate(row_data, 1):
-                    if isinstance(val, float) and not math.isfinite(val):
-                        val = str(val)
-                    cell = ws.cell(row=i + 1, column=col_idx, value=val)
-                    cell.font = styles['data_font']
-                    cell.alignment = styles['align_center']
-                    cell.border = styles['thin_border']
-
-                    if r.get('valid') and r.get('delta_m_tel', -1) > 0:
-                        cell.fill = styles['green_fill']
-                    elif r.get('valid') and r.get('delta_m_ne', -1) > 0:
-                        cell.fill = styles['light_green_fill']
-        else:
-            ws.cell(row=2, column=1, value='Tidak ada data timestep (mode sunset)').font = styles['data_font']
-
-        # Auto-fit column widths
-        for col_idx in range(1, len(timestep_headers) + 1):
-            max_len = len(str(timestep_headers[col_idx - 1]))
-            for row_idx in range(2, min(len(all_results) + 2, 100)):
-                cell_val = ws.cell(row=row_idx, column=col_idx).value
-                if cell_val:
-                    max_len = max(max_len, len(str(cell_val)))
-            ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 3, 25)
-
-        ws.freeze_panes = 'A2'
-
-    def _write_info_sheet(self, ws, styles):
-        """Menulis sheet Info Program ke worksheet."""
-        ws.sheet_properties.tabColor = 'BF8F00'
-        ws.column_dimensions['A'].width = 30
-        ws.column_dimensions['B'].width = 50
-
-        tel = self.hasil.get('tel_params', {})
-        info_data = [
-            ('Program', 'Perhitungan Visibilitas Hilal'),
-            ('Model Sky Brightness', 'Schaefer (1993)'),
-            ('Model Luminansi Hilal', 'Kastner (1976)'),
-            ('Semidiameter Bulan', 'Skyfield + DE440s; asin(R_bulan / jarak astrometrik toposentrik)'),
-            ('Sudut Fase Bulan', 'phase_angle(Sun) native Skyfield pada posisi astrometrik'),
-            ('Lebar Sabit', 'W = 2 r k; k = fraksi iluminasi astrometrik'),
-            ('Radius Bola Bulan (km)', MOON_RADIUS_KM),
-            ('Model Teleskop', 'Schaefer (1990)'),
-            ('Sumber Data Atmosfer', self.SUMBER_ATMOSFER_LABEL.get(self.sumber_atmosfer, self.sumber_atmosfer)),
-            ('Mode Perhitungan', self.hasil.get('mode', 'sunset')),
-            ('Tanggal Eksekusi', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
-            ('Catatan Schaefer', 'Moonlight excluded (Bulan = objek pengamatan)'),
-            ('Kontrak Ekstingsi', 'A_V = DM[2]; T_V = 10^(-0.4 A_V); k_v hanya diagnostik'),
-            ('Kontrak Luminansi', 'L_hilal adalah excess luminance; L_obj = 0.263 L_star_s10 T_V'),
-            ('Kontrak Kontras', 'C_obj = L_obj / B_sky; delta_m = 2.5 log10(C_obj / C_th)'),
-            ('', ''),
-            ('--- Parameter Teleskop ---', ''),
-            ('Aperture (mm)', f"{tel.get('aperture', 100.0)}"),
-            ('Magnification (x)', f"{tel.get('magnification', 50.0)}"),
-            ('Central Obstruction (mm)', f"{tel.get('central_obstruction', 0.0)}"),
-            ('Transmission', f"{tel.get('transmission', 0.95)}"),
-            ('N Surfaces', f"{tel.get('n_surfaces', 6)}"),
-            ('Observer Age', f"{tel.get('observer_age', 22.0)}"),
-            ('Seeing (arcsec)', f"{tel.get('seeing', 3.0)}"),
-            ('Field Factor Teleskop (F)', f"{tel.get('field_factor', 2.4)}"),
-            ('Field Factor Naked Eye (F)', f"{self.hasil.get('F_naked', 2.5)}"),
-        ]
-
-        for col_idx, header in enumerate(['Parameter', 'Nilai'], 1):
-            cell = ws.cell(row=1, column=col_idx, value=header)
-            cell.font = styles['header_font']
-            cell.fill = styles['header_fill']
-            cell.alignment = styles['align_center']
-            cell.border = styles['thin_border']
-
-        for i, (param, nilai) in enumerate(info_data, 2):
-            cell_p = ws.cell(row=i, column=1, value=param)
-            cell_p.font = styles['data_font_bold'] if param.startswith('---') else styles['data_font']
-            cell_p.border = styles['thin_border']
-            cell_v = ws.cell(row=i, column=2, value=nilai)
-            cell_v.font = styles['data_font']
-            cell_v.border = styles['thin_border']
-
-        ws.freeze_panes = 'A2'
-
     def simpan_ke_excel(self, filepath: str) -> str:
+        """Export single-location results with separate NE/telescope columns.
+
+        Ringkasan, Input & Konfigurasi, Rantai Model, Atmosfer, Timestep Data
+        and Info Program expose recorded inputs, formulas, units and decisions.
+        No weather or visibility calculation is repeated during export.
         """
-        Menyimpan seluruh hasil perhitungan ke file Excel (.xlsx) dengan format rapi.
+        from single_excel_report import write_single_workbook
 
-        Excel terdiri dari 3 sheet:
-        1. Ringkasan   - Seluruh data summary hasil perhitungan
-        2. Timestep Data - Data per-timestep (jika mode optimal)
-        3. Info Program  - Metadata program
-
-        Parameters:
-        -----------
-        filepath : str
-            Path lengkap file Excel yang akan disimpan
-
-        Returns:
-        --------
-        str
-            Path file yang berhasil disimpan
-        """
-        wb = Workbook()
-        styles = self._excel_styles()
-
-        # Sheet 1: Ringkasan
-        ws1 = wb.active
-        ws1.title = "Ringkasan"
-        self._write_ringkasan_sheet(ws1, styles)
-
-        # Sheet 2: Timestep Data
-        ws2 = wb.create_sheet(title="Timestep Data")
-        self._write_timestep_sheet(ws2, styles)
-
-        # Sheet 3: Info Program
-        ws3 = wb.create_sheet(title="Info Program")
-        self._write_info_sheet(ws3, styles)
-
-        # Save
-        output_dir = os.path.dirname(filepath)
-        if output_dir and not os.path.exists(output_dir):
-            os.makedirs(output_dir, exist_ok=True)
-
-        wb.save(filepath)
-        save_atmosphere_provenance(filepath, [atmosphere_audit_record(
+        output = write_single_workbook(self, filepath)
+        save_atmosphere_provenance(output, [atmosphere_audit_record(
             self.nama_tempat, self.sumber_atmosfer, True, self.hasil,
         )])
-        print(f"\n  âœ“ Hasil disimpan ke: {filepath}")
-
-        return filepath
+        print(f"\n  Hasil Excel disimpan ke: {output}")
+        return output
 
 
 def tentukan_timezone_indonesia(longitude: float) -> str:
@@ -3048,7 +2501,8 @@ def _simpan_excel_multi(results: list, shared_params: dict, filepath: str) -> st
         ('Central Obstruction (mm)', f"{tel.get('central_obstruction', 0.0)}"),
         ('Transmission', f"{tel.get('transmission', 0.95)}"),
         ('N Surfaces', f"{tel.get('n_surfaces', 6)}"),
-        ('Observer Age', f"{tel.get('observer_age', 22.0)}"),
+        ('Observer Age (pupil fallback)', f"{tel.get('observer_age', 22.0)}"),
+        ('Pupil Override (mm)', tel.get('pupil_diameter_mm') or 'Age-based dark-pupil estimate'),
         ('Field Factor Teleskop (F)', f"{tel.get('field_factor', 2.4)}"),
         ('Field Factor Naked Eye (F)', f"{shared_params['F_naked']}"),
         ('', ''),

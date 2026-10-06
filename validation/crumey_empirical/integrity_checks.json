@@ -1,0 +1,33 @@
+{
+  "checked_at_utc": "2026-10-05T13:53:45.315782+00:00",
+  "observations": 278,
+  "modeled_cases": 276,
+  "scene_count": 14440,
+  "weather_failures": 0,
+  "visual_calibration_eligible": 0,
+  "calculation_fingerprint_matches_current": true,
+  "floor_scene_count": 0,
+  "min_apparent_background_cd_m2": 0.00019911788725338154,
+  "max_apparent_background_cd_m2": 373.78299843412657,
+  "max_naked_eye_background_cd_m2": 5934.636831870914,
+  "naked_eye_scenes_above_blackwell_background_max": 23,
+  "source_flux_identity_max_relative_error": 2.4424906541753444e-15,
+  "area_1_to_point_1_margin_change_median_mag": 0.06829703531983378,
+  "area_1_to_point_1_margin_change_max_mag": 0.3856291137600536,
+  "area_sensitive_classifications": [
+    {
+      "observation_no": 90,
+      "full_area_margin": 0.0014127540194452948,
+      "one_tenth_area_margin": -0.04166897328298114
+    }
+  ],
+  "photometry_rounding_sensitive_classifications_on_same_samples": [
+    {
+      "observation_no": 90,
+      "observed": false,
+      "corrected_margin": 0.0014127540194452948,
+      "rounded_photometry_margin_on_same_samples": -0.0065770594915167
+    }
+  ],
+  "checks": "Dataset/input hashes, runtime fingerprint, IDs, snapshots, area, optics, threshold, contrast, source flux photometry, margins, altitude, maxima and area monotonicity match the current numerical contract. Artifact verification does not establish empirical visual validity."
+}
