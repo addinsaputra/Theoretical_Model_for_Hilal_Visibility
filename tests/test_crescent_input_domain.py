@@ -5,10 +5,9 @@ from pathlib import Path
 import sys
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Core'))
 
-from crescent_geometry import crescent_area
-from visual_limit_kastner import hitung_luminansi_intrinsik, terapkan_transmisi_atmosfer
+from hilal_visibility.models.geometry import crescent_area
+from hilal_visibility.models.kastner import hitung_luminansi_intrinsik, terapkan_transmisi_atmosfer
 
 
 class CrescentInputDomainTests(unittest.TestCase):

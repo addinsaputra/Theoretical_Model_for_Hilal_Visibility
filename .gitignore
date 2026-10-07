@@ -9,6 +9,7 @@ build/
 venv/
 
 # Cache
+.cache/
 .cache.sqlite
 *.sqlite
 .mypy_cache/
@@ -31,7 +32,8 @@ Thumbs.db
 .DS_Store
 
 # Output files (generated)
-Core/output/
+outputs/*
+!outputs/README.md
 
 # Factory/temp
 .factory/

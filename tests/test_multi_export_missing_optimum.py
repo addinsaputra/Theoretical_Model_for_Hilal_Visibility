@@ -13,10 +13,7 @@ from unittest.mock import patch
 
 from openpyxl import load_workbook
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Core'))
-import core_multi_location as batch
-
-
+import hilal_visibility.batch as batch
 def observation(no=1, **updates):
     time = datetime(2023, 3, 22, 18)
     row = dict(

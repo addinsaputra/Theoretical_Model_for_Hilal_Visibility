@@ -5,10 +5,9 @@ import sys
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Core'))
 
-import analisis_diagnostik_crumey as diagnostics
-from core_crescent_visibility import HilalVisibilityCalculator
+import hilal_visibility.studies.diagnostics as diagnostics
+from hilal_visibility.calculator import HilalVisibilityCalculator
 
 
 class DiagnosticThresholdTests(unittest.TestCase):
@@ -27,7 +26,8 @@ class DiagnosticThresholdTests(unittest.TestCase):
                         10, 1000, 8, 'telescope', moon_sd_deg=.26)
                     result = calc.hitung_visibilitas_teleskop(
                         10, 1000, position, aperture=aperture,
-                        magnification=magnification, central_obstruction=obstruction)
+                        magnification=magnification, central_obstruction=obstruction,
+                        field_factor=diagnostics.F_TEL)
                     self.assertAlmostEqual(diagnostic['C_obj'], result[2])
                     self.assertAlmostEqual(diagnostic['C_th'], result[3])
                     self.assertAlmostEqual(diagnostic['delta_m'], result[4])

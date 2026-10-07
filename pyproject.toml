@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crescent-visibility-telescope"
+version = "0.1.0"
+description = "Schaefer-Kastner-Crumey crescent visibility calculations"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dynamic = ["dependencies"]
+
+[project.scripts]
+hilal-visibility = "hilal_visibility.cli:run"
+hilal-batch = "hilal_visibility.batch:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}

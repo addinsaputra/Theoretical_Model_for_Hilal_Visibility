@@ -5,11 +5,8 @@ from pathlib import Path
 import sys
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Core'))
 
-import full_rumus_crumey as crumey
-
-
+import hilal_visibility.models.crumey as crumey
 class IncrementThresholdTests(unittest.TestCase):
     def test_combined_equation_across_dark_mesopic_and_daylight_backgrounds(self):
         area, factor = 2.3e-6, 2.4

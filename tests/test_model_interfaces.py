@@ -11,21 +11,21 @@ import unittest
 import tempfile
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Core'))
 
-from crescent_geometry import crescent_area
-from visual_limit_schaefer import hitung_sky_brightness, transmission_from_extinction_mag
-from visual_limit_kastner import (
+from hilal_visibility.models.geometry import crescent_area
+from hilal_visibility.models.schaefer import hitung_sky_brightness, transmission_from_extinction_mag
+from hilal_visibility.models.kastner import (
     S10_TO_NL, hitung_luminansi_intrinsik, terapkan_transmisi_atmosfer,
 )
-from full_rumus_crumey import (
+from hilal_visibility.models.crumey import (
     crescent_area_deg2, crescent_area_arcmin2, crescent_area_sr,
     crumey_visibility, is_visible, hilal_naked_eye_visibility,
     visibility_margin_mag, arcmin2_to_sr, nL_to_cdm2, mag_to_lux,
 )
-from core_crescent_visibility import HilalVisibilityCalculator, _simpan_excel_multi, _plot_multi_lokasi
-from core_multi_location import run_single_observation, save_to_csv, save_to_excel
-from analisis_diagnostik_crumey import compute_delta_m, compute_full_chain, load_observation_data
+from hilal_visibility.calculator import HilalVisibilityCalculator
+from hilal_visibility.reports.multi_location import _simpan_excel_multi, _plot_multi_lokasi
+from hilal_visibility.batch import run_single_observation, save_to_csv, save_to_excel
+from hilal_visibility.studies.diagnostics import compute_delta_m, compute_full_chain, load_observation_data
 from openpyxl import load_workbook
 
 
@@ -103,7 +103,7 @@ class ContrastInterfaceTests(unittest.TestCase):
     def test_boundary_and_no_source(self):
         self.assertEqual(visibility_margin_mag(0.1, 0.1), 0)
         self.assertEqual(visibility_margin_mag(0, 0.1), float('-inf'))
-        with patch('full_rumus_crumey.contrast_threshold', return_value=1):
+        with patch('hilal_visibility.models.crumey.contrast_threshold', return_value=1):
             result = hilal_naked_eye_visibility(1000, 1000, 8, 0.26)
         self.assertEqual(result['delta_m'], 0)
         self.assertFalse(result['visible'])
@@ -123,7 +123,7 @@ class CoreInterfaceTests(unittest.TestCase):
 
     def test_core_passes_explicit_schaefer_values(self):
         sky = dict(sky_brightness=1000, k_v=0.2, extinction_mag_v=2, transmission_v=10**-0.8)
-        with patch('core_crescent_visibility.hitung_sky_brightness', return_value=sky):
+        with patch('hilal_visibility.calculator.hitung_sky_brightness', return_value=sky):
             B, k, extinction, transmission = self.calc.hitung_sky_brightness_schaefer(75, 25, self.posisi)
         self.assertEqual((B, k, extinction, transmission), (1000, 0.2, 2, 10**-0.8))
         source = self.calc.hitung_luminansi_hilal_kastner(self.posisi, transmission)
@@ -131,7 +131,7 @@ class CoreInterfaceTests(unittest.TestCase):
         self.assertAlmostEqual(source / intrinsic, S10_TO_NL * transmission)
 
     def test_core_does_not_substitute_assumed_extinction_on_error(self):
-        with patch('core_crescent_visibility.hitung_sky_brightness', side_effect=ValueError('invalid')):
+        with patch('hilal_visibility.calculator.hitung_sky_brightness', side_effect=ValueError('invalid')):
             with self.assertRaises(ValueError):
                 self.calc.hitung_sky_brightness_schaefer(100, 25, self.posisi)
 
@@ -201,7 +201,7 @@ class IntegrationAndExportTests(unittest.TestCase):
                    lon=110.348, elv=89, bulan_hijri=9, tahun_hijri=1444,
                    bias_t=0, bias_rh=0, observed=True)
         cls.obs = obs
-        with patch('core_multi_location.HilalVisibilityCalculator') as calculator:
+        with patch('hilal_visibility.batch.HilalVisibilityCalculator') as calculator:
             calculator.return_value.jalankan_perhitungan_lengkap.return_value = cls.hasil
             with contextlib.redirect_stdout(io.StringIO()):
                 cls.batch = run_single_observation(obs, verbose=False)
@@ -260,6 +260,16 @@ class IntegrationAndExportTests(unittest.TestCase):
             self.assertEqual(float(row['P_Sunset']), self.hasil['pressure'])
             self.assertEqual(float(row['P_NE_Optimal']), self.hasil['optimal_result_ne']['pressure'])
             self.assertEqual(float(row['P_Tel_Optimal']), self.hasil['optimal_result_tel']['pressure'])
+            for suffix, mode, scene in (
+                ('NE_Sunset', 'ne', self.hasil), ('Tel_Sunset', 'tel', self.hasil),
+                ('NE_Optimal', 'ne', self.hasil['optimal_result_ne']),
+                ('Tel_Optimal', 'tel', self.hasil['optimal_result_tel']),
+            ):
+                self.assertEqual(row[f'Regime_{suffix}'], scene[f'crumey_{mode}_regime'])
+                self.assertEqual(row[f'Achromatic_Extrapolation_{suffix}'],
+                                 str(scene[f'crumey_{mode}_achromatic_extrapolation']))
+            self.assertEqual(float(row['Threshold_Difference_Sunset_mag']), self.hasil['threshold_difference_mag'])
+            self.assertEqual(row['F_Comparison'], self.hasil['field_factor_comparison'])
             diagnostic = load_observation_data(str(path)).iloc[0]
             self.assertEqual(diagnostic['Moon Semidiameter (deg)'],
                              self.hasil['optimal_result_tel']['moon_semidiameter'])
@@ -283,6 +293,12 @@ class IntegrationAndExportTests(unittest.TestCase):
             try:
                 ws = wb['Hasil Observasi']
                 self.assertEqual(ws.max_column, 60)
+                visual = wb['Diagnostik Visual']
+                diagnostics = dict(zip([cell.value for cell in visual[1]], [cell.value for cell in visual[2]]))
+                self.assertEqual(diagnostics['Regime_NE_Sunset'], self.hasil['crumey_ne_regime'])
+                self.assertEqual(diagnostics['Regime_Tel_Optimal'], self.hasil['optimal_result_tel']['crumey_tel_regime'])
+                self.assertEqual(diagnostics['Achromatic_Extrapolation_NE_Sunset'],
+                                 self.hasil['crumey_ne_achromatic_extrapolation'])
                 self.assertAlmostEqual(ws.cell(3, 49).value, self.hasil['extinction_mag_v'])
                 self.assertAlmostEqual(ws.cell(3, 50).value, self.hasil['transmission_v'])
                 self.assertAlmostEqual(ws.cell(3, 53).value,
@@ -312,9 +328,9 @@ class IntegrationAndExportTests(unittest.TestCase):
             'optimal_result_ne': {**self.hasil['optimal_result_ne'], 'pressure': 1002.234567},
             'optimal_result_tel': {**self.hasil['optimal_result_tel'], 'pressure': 1003.345678},
         }
-        with patch('core_multi_location.HilalVisibilityCalculator') as calculator:
+        with patch('hilal_visibility.batch.HilalVisibilityCalculator') as calculator:
             calculator.return_value.jalankan_perhitungan_lengkap.return_value = calculation
-            with patch('core_multi_location.CALC_MODE', 'optimal'), contextlib.redirect_stdout(io.StringIO()):
+            with patch('hilal_visibility.batch.CALC_MODE', 'optimal'), contextlib.redirect_stdout(io.StringIO()):
                 result = run_single_observation(self.obs, verbose=False)
         self.assertTrue(result['success'])
         self.assertEqual((result['pressure'], result['opt_ne_pressure'], result['opt_tel_pressure']),
@@ -336,9 +352,9 @@ class IntegrationAndExportTests(unittest.TestCase):
                 wb.close()
 
     def test_sunset_mode_leaves_optimal_pressures_blank(self):
-        with patch('core_multi_location.HilalVisibilityCalculator') as calculator:
+        with patch('hilal_visibility.batch.HilalVisibilityCalculator') as calculator:
             calculator.return_value.jalankan_perhitungan_lengkap.return_value = self.hasil
-            with patch('core_multi_location.CALC_MODE', 'sunset'), contextlib.redirect_stdout(io.StringIO()):
+            with patch('hilal_visibility.batch.CALC_MODE', 'sunset'), contextlib.redirect_stdout(io.StringIO()):
                 result = run_single_observation(self.obs, verbose=False)
         self.assertTrue(result['success'])
         self.assertEqual(result['pressure'], self.hasil['pressure'])

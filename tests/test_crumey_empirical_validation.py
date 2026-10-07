@@ -8,10 +8,7 @@ import unittest
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Core'))
-import crumey_empirical_validation as study
-
-
+import hilal_visibility.studies.crumey_empirical as study
 def visual_case(number, event, observed, method='naked_eye'):
     case = dict(observation_no=number, date=event, observed=observed, label_method=method,
                 timezone_str='UTC',
@@ -37,7 +34,7 @@ def synthetic_rows():
 
 class EligibilityTests(unittest.TestCase):
     def test_all_actual_bmkg_labels_are_imaging_and_ineligible(self):
-        rows = study.load_observations(study.ROOT / 'Core' / 'core_multi_location.py')
+        rows = study.load_observations(study.OBSERVATIONS_PATH)
         self.assertEqual(len(rows), 278)
         self.assertEqual(len(set(row['date'] for row in rows)), 26)
         self.assertEqual(sum(row['observed'] for row in rows), 139)
@@ -151,7 +148,8 @@ class StatisticalContractTests(unittest.TestCase):
 
     def test_fit_rejects_nonfinite_margins_and_invalid_bounds(self):
         for margins, bounds in (([np.nan, 1], study.F_BOUNDS), ([1, np.inf], study.F_BOUNDS),
-                                ([1, 2], (-1, 20)), ([1, 2], (2, 20)), ([1, 2], (.5, np.inf))):
+                                ([1, 2], (-1, 20)), ([1, 2], (study.F_REF + .1, 20)),
+                                ([1, 2], (.5, np.inf))):
             with self.subTest(margins=margins, bounds=bounds), self.assertRaises(ValueError):
                 study.fit_field_factor(margins, [False, True], ['a', 'b'], bounds=bounds,
                                         observation_methods=['naked_eye', 'naked_eye'])
@@ -164,7 +162,7 @@ class StatisticalContractTests(unittest.TestCase):
 
     def test_zero_luminance_margin_roundtrips_export_resume_and_report(self):
         import json
-        from full_rumus_crumey import visibility_margin_mag
+        from hilal_visibility.models.crumey import visibility_margin_mag
         margin = visibility_margin_mag(0.0, 0.1)
         self.assertEqual(margin, float('-inf'))
         row = dict(case=visual_case(1, '2024-04-09', False), status='complete', error=None,

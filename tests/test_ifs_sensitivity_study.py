@@ -10,10 +10,8 @@ import unittest
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Core'))
-from atmosfer_ecmwf_ifs import AtmosphericWindow, ECMWF_IFSAPIError
-import ifs_sensitivity_study as study
-
+from hilal_visibility.atmosphere.ifs import AtmosphericWindow, ECMWF_IFSAPIError
+import hilal_visibility.studies.ifs_sensitivity as study
 START = datetime(2024, 4, 9, 10, tzinfo=timezone.utc)
 
 

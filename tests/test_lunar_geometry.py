@@ -9,11 +9,10 @@ from unittest.mock import patch
 
 from pytz import timezone as local_timezone
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Core'))
 
-import data_hisab as hisab
-from core_crescent_visibility import HilalVisibilityCalculator
-from analisis_diagnostik_crumey import _observation_semidiameter_deg, compute_delta_m
+import hilal_visibility.ephemeris as hisab
+from hilal_visibility.calculator import HilalVisibilityCalculator
+from hilal_visibility.studies.diagnostics import _observation_semidiameter_deg, compute_delta_m
 
 
 class LunarGeometryTests(unittest.TestCase):

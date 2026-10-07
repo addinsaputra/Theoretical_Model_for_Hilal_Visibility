@@ -13,10 +13,9 @@ import sys
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Core'))
 
-from core_crescent_visibility import HilalVisibilityCalculator
-from telescope_limit import TelescopeVisibilityModel, extended_surface_correction_factor
+from hilal_visibility.calculator import HilalVisibilityCalculator
+from hilal_visibility.models.telescope import TelescopeVisibilityModel, extended_surface_correction_factor
 
 
 class OpticalDomainTests(unittest.TestCase):
@@ -147,6 +146,42 @@ class CompleteOptimalPropagationTests(unittest.TestCase):
         self.assertIsNone(result['optimal_result_tel'])
         self.assertTrue(all(sample['delta_m_tel'] == 0
                             for sample in result['all_timestep_results'] if sample['valid']))
+        self.assertIsNone(result['threshold_difference_mag'])
+        self.assertIsNone(result['crumey_tel_regime'])
+
+    def test_residual_factor_inherits_naked_eye_through_scan_and_refinement(self):
+        for configuration in ({}, {'F_naked': 3.7}, {'F_naked': 3.7, 'field_factor': None}):
+            with self.subTest(configuration=configuration):
+                result, calls = self.run_fixture(configuration)
+                F = configuration.get('F_naked', 2.0)
+                self.assertEqual(result['tel_params']['field_factor'], F)
+                self.assertTrue(all(call.kwargs['field_factor'] == F for call in calls))
+                scenes = [result, *result['all_timestep_results'], result['optimal_result_tel']]
+                for scene in scenes:
+                    if scene and scene.get('valid', True):
+                        self.assertEqual(scene['field_factor_comparison'], 'shared_residual_factor')
+                        self.assertAlmostEqual(scene['model_trace']['telescope']['threshold']['phi'], F * math.sqrt(2))
+                        self.assertAlmostEqual(scene['threshold_difference_mag'], scene['delta_m_tel'] - scene['delta_m_ne'])
+                        self.assertEqual(scene['threshold_difference_mag'], scene['telescope_gain'])
+
+    def test_independent_residual_factors_are_explicit_and_do_not_change_optics(self):
+        shared, _ = self.run_fixture({'F_naked': 3.7})
+        shared_difference = shared['threshold_difference_mag']
+        shared_optics = shared['model_trace']['telescope']['optics']
+        independent, _ = self.run_fixture({'F_naked': 3.7, 'field_factor': 1.8})
+        self.assertEqual(independent['field_factor_comparison'], 'independent_residual_factors')
+        self.assertEqual(shared_optics, independent['model_trace']['telescope']['optics'])
+        self.assertAlmostEqual(independent['threshold_difference_mag'] - shared_difference,
+                               2.5 * math.log10(3.7 / 1.8))
+
+    def test_direct_timestep_inherits_residual_factor(self):
+        with (patch.object(self.calc, 'hitung_posisi_matahari_bulan', return_value=self.position),
+              patch.object(self.calc, 'hitung_sky_brightness_schaefer', return_value=(1000, .2, .5, 10**-.2)),
+              patch.object(self.calc, 'hitung_luminansi_hilal_kastner', return_value=10)):
+            result = self.calc.hitung_visibilitas_pada_waktu(
+                self.sunset, object(), F_naked=3.7, cached_atm=(75, 25, 1013.25))
+        self.assertAlmostEqual(result['model_trace']['telescope']['threshold']['phi'], 3.7 * math.sqrt(2))
+        self.assertEqual(result['field_factor_comparison'], 'shared_residual_factor')
 
     def test_refinement_does_not_optimise_below_requested_altitude(self):
         # Increasing excess luminance would favor a later, lower crescent.

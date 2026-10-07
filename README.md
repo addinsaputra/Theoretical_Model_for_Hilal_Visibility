@@ -1,10 +1,40 @@
 # Perhitungan Visibilitas Hilal
 
-## Kombinasi Model Schaefer dan Kastner Berbasis Data Reanalisis Atmosfer
+## Kombinasi Model Schaefer, Kastner, dan Crumey Berbasis Input Meteorologi
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Status](https://img.shields.io/badge/Status-Active-success)
+
+## Mulai menjalankan program
+
+Buka terminal di **folder proyek** yang berisi `scripts/`, `src/`, dan
+`.venv/`. Anda tetap dapat menjalankan file Python langsung seperti dulu.
+
+Untuk lokasi tunggal maupun multi-lokasi yang Anda pilih sendiri:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_visibility.py
+```
+
+- Pilih `1` pada menu awal untuk **lokasi tunggal**.
+- Pilih `2` pada menu awal untuk **multi-lokasi**; berikutnya pilih semua
+  82 lokasi atau masukkan beberapa nomor, misalnya `1,2`.
+
+Untuk menjalankan seluruh **278 kasus dataset observasi penelitian**:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_batch.py
+```
+
+| File yang dahulu dijalankan | Peluncur sekarang |
+| --- | --- |
+| `core_crescent_visibility.py` | `scripts/run_visibility.py` |
+| `core_multi_location.py` | `scripts/run_batch.py` |
+
+File hasil yang disimpan berada di `outputs/`. Baseline F mata telanjang dan teleskop adalah
+**2.0**. Baca [panduan langkah demi langkah](docs/RUNNING.md) untuk contoh
+isian menu, perbedaan batch, dan instalasi pertama.
 
 ---
 
@@ -26,14 +56,14 @@ Program ini menghitung visibilitas hilal dengan mengintegrasikan:
 | Aspek                             | Penelitian Sebelumnya                              | Program Ini                                                              |
 | --------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------ |
 | **Sky Brightness**          | Diperoleh dari website (algoritma tidak diketahui) | Dihitung menggunakan **model Schaefer** dengan algoritma transparan |
-| **Koefisien Ekstingsi (k)** | Menggunakan nilai asumsi (misal k=0.5)             | Dihitung berdasarkan **parameter atmosfer aktual** (RH, T, P)       |
+| **Koefisien Ekstingsi (k)** | Menggunakan nilai asumsi (misal k=0.5)             | Parameterisasi Schaefer memakai RH, T, elevasi, lokasi dan waktu; tekanan digunakan untuk refraksi |
 | **Luminansi Hilal**         | Model Kastner dengan k asumsi                      | Luminansi intrinsik Kastner dikalikan **transmisi LOS Schaefer**    |
 | **Data Atmosfer**           | Tidak ada / asumsi standar                         | Data **arsip ECMWF IFS dan reanalisis MERRA-2** dengan interpolasi temporal    |
 | **Visibilitas Teleskop**    | Koreksi sederhana (Schaefer 1990)                  | Model terintegrasi **Schaefer-Crumey** dengan contrast threshold    |
 
 ### Kontribusi Utama
 
-> **Kebaruan penelitian ini terletak pada perhitungan koefisien ekstingsi atmosfer secara akurat menggunakan rumus model Schaefer, yang mempertimbangkan parameter atmosfer aktual (suhu, kelembaban, tekanan) dari data reanalisis, bukan berdasarkan asumsi.**
+Parameterisasi ekstingsi Schaefer dievaluasi menggunakan input meteorologi yang bergantung pada waktu dan lokasi dari arsip ECMWF IFS HRES melalui Open-Meteo, reanalisis MERRA-2, atau input manual. Komponen aerosol, ozon, Rayleigh dan uap air tetap mengikuti asumsi model Schaefer; penggunaan arsip meteorologi tidak dengan sendirinya membuktikan akurasi ekstingsi lokal. Tekanan tidak masuk langsung ke koefisien ekstingsi pada implementasi ini, tetapi digunakan pada refraksi posisi. Produk `ecmwf_ifs` merupakan arsip IFS HRES dan berbeda dari reanalisis ERA5. [Dokumentasi sumber Open-Meteo](https://open-meteo.com/en/docs/historical-weather-api#data-sources).
 
 ### Rumus Ekstingsi yang Dihitung (Bukan Asumsi)
 
@@ -55,7 +85,7 @@ K_total = K_R (Rayleigh) + K_A (Aerosol) + K_O (Ozon) + K_W (Uap Air)
 ## 3. Requirements & Dependencies
 
 ### System Requirements
-- **Python**: 3.8 atau lebih tinggi
+- **Python**: 3.10 atau lebih tinggi
 - **OS**: Windows, Linux, atau macOS
 - **Memory**: Minimal 4GB RAM (8GB direkomendasikan)
 - **Storage**: ~50MB untuk ephemeris dan cache
@@ -103,44 +133,49 @@ git clone https://github.com/addinsaputra/Theoretical_Model_for_Hilal_Visibility
 cd Theoretical_Model_for_Hilal_Visibility
 ```
 
-### Step 2: Install Dependencies
-```bash
-pip install -r requirements.txt
+### Step 2: Install Project
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
 ```
 
-### Step 3: Verify Installation
-```bash
-python -c "import skyfield; import numpy; import pandas; print('All dependencies installed')"
+### Step 3: Run Program
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_visibility.py
 ```
 
-### Step 4: Run Program
-```bash
-cd Core
-python core_crescent_visibility.py
-```
+Instalasi editable memakai kode dan data pada checkout ini. Hasil default
+ditulis ke `outputs/`; data ephemeris berada di `data/ephemeris/`.
+Menu awal `1` = lokasi tunggal, `2` = multi-lokasi. Lihat
+[panduan menjalankan](docs/RUNNING.md) untuk langkah lengkap. Instalasi
+cukup dilakukan saat menyiapkan lingkungan; penggunaan berikutnya langsung
+menjalankan file peluncur.
 
 ---
 
 ## 5. Struktur Program
 
+```text
+src/hilal_visibility/
+  calculator.py          # API dan alur perhitungan
+  cli.py                 # Input interaktif
+  batch.py               # Workflow perbandingan observasi
+  ephemeris.py            # Astronomi Skyfield/DE440s
+  models/                # Schaefer, Kastner, Crumey, optik dan luas sabit
+  atmosphere/            # IFS, MERRA-2 dan provenance
+  reports/               # Ekspor Excel dan grafik gabungan
+  studies/               # Diagnostik dan studi sensitivitas
+scripts/                 # Peluncur, pemeriksaan referensi, contoh Excel
+data/                    # Ephemeris, 82 lokasi, 278 observasi CCD
+docs/reviews/            # Saran perubahan dan audit historis
+tests/                   # Regresi model dan tata letak paket
+validation/              # Artefak penelitian historis
+outputs/                 # Hasil perhitungan dan studi baru, diabaikan Git
 ```
-Core/
-├── core_crescent_visibility.py      # Program utama (unified, semua sumber atmosfer)
-├── visual_limit_schaefer.py         # Background langit, k_v, LOS extinction, transmisi
-├── visual_limit_kastner.py          # Luminansi intrinsik + transmisi Schaefer
-├── crescent_geometry.py             # Luas sabit dari elongasi, bersama Kastner/Crumey
-├── core_multi_location.py           # Batch observasi dan ekspor Excel/CSV
-├── analisis_diagnostik_crumey.py     # Sensitivitas atmosfer dan diagnostik antarmuka
-├── full_rumus_crumey.py             # Implementasi lengkap model Crumey (2014) — contrast threshold
-├── crumey_validation.py             # Pengujian & validasi implementasi Crumey vs paper
-├── telescope_limit.py               # Ambang batas visibilitas hilal teleskop (Schaefer 1990)
-├── atmosfer_ecmwf_ifs.py            # API Open-Meteo ECMWF IFS
-├── atmosfer_merra2.py               # API NASA POWER MERRA-2 (data reanalisis 1981-sekarang)
-├── data_hisab.py                    # Perhitungan astronomi (ijtima, posisi matahari/bulan)
-├── daftar_lokasi.py                 # Database lokasi pengamatan
-├── de440s.bsp                       # Ephemeris JPL (~32MB)
-└── output/                          # Direktori output file Excel & grafik PNG
-```
+
+Lihat [panduan struktur dan pemetaan modul lama](docs/PROJECT_STRUCTURE.md)
+serta [daftar peluncur](scripts/README.md). Baseline residual F mata telanjang
+dan teleskop tetap sama, 2.0.
 
 ---
 
@@ -258,7 +293,7 @@ $$
 A = \frac{1}{2} \pi r^2 (1 - \cos\varepsilon)
 $$
 
-Dalam model luas baseline ini, elongasi $\varepsilon$ masuk ke luas sabit melalui satu fungsi bersama di `Core/crescent_geometry.py`. Luas ini digunakan Kastner dan Crumey, dengan konversi ke arcmin² atau steradian sesuai kebutuhan. Sudut fase $\alpha$ masuk ke phase law magnitudo serta lebar geometrik di bawah. Phase law lama di §8.1 dipertahankan sebagai baseline.
+Dalam model luas baseline ini, elongasi $\varepsilon$ masuk ke luas sabit melalui satu fungsi bersama di `src/hilal_visibility/models/geometry.py`. Luas ini digunakan Kastner dan Crumey, dengan konversi ke arcmin² atau steradian sesuai kebutuhan. Sudut fase $\alpha$ masuk ke phase law magnitudo serta lebar geometrik di bawah. Phase law lama di §8.1 dipertahankan sebagai baseline.
 
 Lebar bagian cakram yang diterangi sekarang dihitung dari fraksi iluminasi astrometrik:
 
@@ -283,7 +318,7 @@ Nilai ini **bukan field semidiameter native Skyfield atau DE440s**. Pada jalur l
 
 Kalkulator menggunakan jarak astrometrik dari `moon_position_time_local()`, sedangkan altitude/azimuth fungsi tersebut berasal dari posisi apparent (dengan refraksi jika diminta). Elongasi tetap merupakan separasi apparent Matahari–Bulan. `set_location()` menggunakan `api.wgs84.latlon()` sesuai [rekomendasi Skyfield](https://rhodesmill.org/skyfield/installation.html), menggantikan `Topos` berbasis IERS2010. Karena itu `moon_semidiameter` bergantung pada lokasi, elevasi, tanggal, jam, menit, dan detik pengamatan, serta diteruskan ke Kastner dan Crumey pada setiap timestep. Jalur PyMeeus dan perhitungan semidiameter dari parallax tanggal saja telah dihapus.
 
-API di `Core/data_hisab.py`:
+API di `src/hilal_visibility/ephemeris.py`:
 
 - `moon_semidiameter_from_distance(distance_km)` → semidiameter dalam derajat.
 - `moon_semidiameter_time_utc(...)` / `moon_semidiameter_time_local(...)` → semidiameter dari DE440s; tanpa lokasi memakai pengamat di pusat Bumi.
@@ -315,6 +350,10 @@ Pada $C_{obj}=C_{th}$, margin nol. Status terlihat menggunakan perbandingan keta
 
 Semua helper point source, extended source, magnitude, serta kalkulator memakai satu kontrak `increment_threshold(A_sr, B, F, mode)`. Output utamanya adalah ambang **increment luminansi** dalam cd/m²; `contrast_threshold` membaginya dengan background aktual. Default `mode='auto'` memakai kurva combined untuk gelap, mesopic, dan senja. Mode eksplisit scotopic dibatasi `B <= 0.03426 cd/m²`, photopic `B >= 3.4 cd/m²`; ini pemeriksaan domain bentuk sederhana, bukan bukti validitas hilal pada semua background.
 
+`F` pada pipeline hilal adalah **residual visual field factor**: laboratory scaling, pengamat, dan efek target/viewing yang belum dimodelkan. Ekstingsi atmosfer, transmisi optik, magnifikasi, serta `F_T`/`F_M` sudah eksplisit dan tidak dihitung ulang dalam `F`. Nilai bawaan kalkulator `F_naked=2.0` adalah referensi yang belum dikalibrasi khusus hilal, tanpa kategori mahir/tipikal/pemula. Jika `field_factor` teleskop tidak diberikan atau `None`, ia mengikuti `F_naked`, termasuk nilai khusus pengguna. Nilai eksplisit yang berbeda tetap didukung dan ditandai `field_factor_comparison='independent_residual_factors'`. Baseline mata telanjang dan teleskop pada kalkulator, batch, serta studi perbandingan memakai referensi bersama 2.0.
+
+Output `crumey_ne_regime` dan `crumey_tel_regime` memakai luminansi latar aktual mata telanjang dan latar apparent setelah optik. Definisi kerja scotopic adalah `<0.005 cd/m²`, mesopic `0.005–5 cd/m²`, dan photopic `>5 cd/m²`; batas ini tidak memilih kurva atau merekonstruksi riwayat adaptasi. Flag `crumey_*_achromatic_extrapolation=True` pada mesopic/photopic menyatakan **aproksimasi threshold luminansi achromatic**, tanpa koreksi warna atau validasi persepsi hilal senja. Definisi kerja dan batas warna mengikuti [Crumey, Sec. 1.3 dan 4](https://arxiv.org/html/1405.4209).
+
 Untuk `B <= 1e-5 cd/m²`, increment dibekukan pada nilai kurva di floor untuk luas yang diberikan, sehingga tidak menuju nol ketika background menghilang. Pada teleskop luas tetap `M² A`. Kebijakan kontinu ini **merupakan ekstensi yang dinyatakan**, berbeda dari pembacaan literal contrast konstan pada Eq. 50 dan pendekatan luas beku `M0` pada Sec. 3.3 paper. Kebijakan ini belum divalidasi empiris untuk hilal. Konversi fotometri memakai zero point `Z_V = 2.54e-6 lux` yang sama, sehingga `mu_lim = m_lim + 2.5 log10(A_arcsec²)` berlaku hingga presisi floating point.
 
 | Nilai Dm | Status                   |
@@ -343,6 +382,8 @@ Visibilitas teleskop dihitung berdasarkan **margin** antara Weber contrast objek
 Faktor optik yang sama mengalikan luminansi excess hilal dan background: $L_{obj,eff}=fL_{obj}$ serta $B_{eff}=fB_{sky}$. Maka kontras tetap $L_{obj}/B_{sky}$. Background adaptasi dan luas tampak ($A_{eff}=M^2 A$) menentukan threshold teleskop yang baru.
 
 Dengan pupil mata terpusat, diameter dalam mm, dan transmisi total `tau = transmission**n_surfaces`, faktor ini adalah `f = tau * max(min(D/M,p)**2 - (Ds/M)**2, 0) / p**2`. Pemotongan pupil diterapkan sebelum menghitung area annular; bayangan sekunder dapat memblokir seluruh pupil. Backend `telescopic_extended_threshold` memakai faktor yang sama. Parameter optik diteruskan utuh ke sunset, scan waktu optimal, dan refinement, termasuk `transmission`, `n_surfaces`, `central_obstruction`, `observer_age`, `field_factor`, serta `pupil_diameter_mm`. Pupil fallback tidak memodelkan adaptasi senja, dan `FM=1` tetap asumsi optik/pengamat.
+
+`threshold_difference_mag = 2.5 log10(C_th,NE/C_th,tel)` membandingkan threshold pada waktu yang sama. Dengan base `F` yang sama, residual `F` saling menghilangkan; `F_T=√2` dan `F_M=1` tetap faktor diferensial teleskop. Jika dua `F` berbeda, selisih juga memuat `2.5 log10(F_NE/F_tel)`. Kunci `telescope_gain`/`optimal_telescope_gain` dan kolom CSV `Tel_Gain` dipertahankan sebagai alias kompatibilitas, dengan arti **selisih threshold**, bukan klaim gain optik murni. Nama baru untuk optimum teleskop adalah `optimal_threshold_difference_mag`.
 
 $$
 \text{Margin} > 0 \Rightarrow \text{TERDETEKSI}
@@ -374,6 +415,8 @@ Data kosong, tidak finite, RH di luar 0–100%, atau tekanan tidak positif
 menyebabkan observasi gagal; program tidak menggantinya dengan cuaca default.
 Mode manual tetap menerima nilai yang dipilih pengguna secara eksplisit.
 
+Validasi meteorologi menerima RH 100%, tetapi evaluasi Schaefer memerlukan **RH finite dalam `0 <= RH < 100%`** karena aerosol mengandung `1/log(RH/100)`. Saturasi dari sampel asli atau clipping koreksi bias menimbulkan `ValueError` berpesan `Outside Schaefer model domain`; observasi batch dicatat invalid beserta error dan provenance atmosfer yang sudah tersedia. Nilai tersebut tidak diganti 99.9%. Batas bawah 1% pada argumen log tetap merupakan perilaku parameterisasi yang sudah ada.
+
 Setiap ekspor CSV/XLSX disertai `<nama-file>.atmosphere.json`, yang menyimpan
 status observasi, error bila gagal, sumber/model, koordinat yang diminta dan
 dikembalikan, elevasi efektif, satuan, waktu, bias, serta sampel hourly mentah
@@ -386,26 +429,47 @@ tetap diperlukan sebelum menetapkan dataset akhir penelitian.
 
 ## 12. Penggunaan
 
-### 12.1 Mode Interaktif (CLI)
+### 12.1 Lokasi tunggal atau multi-lokasi pilihan pengguna
 
-```bash
-python core_crescent_visibility.py
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_visibility.py
 ```
 
-Program akan memandu pengguna melalui langkah-langkah:
-1. Pilih lokasi pengamatan (dari database atau input manual)
-2. Input bulan dan tahun Hijriah
-3. Pilih mode perhitungan (sunset / optimal)
-4. Pilih sumber data atmosfer (ECMWF IFS / MERRA-2 / Manual)
-5. Konfigurasi koreksi bias (opsional)
-6. Konfigurasi parameter teleskop (opsional)
-7. Simpan hasil ke Excel (opsional)
-8. Simpan grafik visibility margin ke PNG (opsional, hanya mode optimal)
+Program memandu langkah berikut:
+
+1. Pilih `1` untuk lokasi tunggal atau `2` untuk multi-lokasi.
+2. Pilih nomor lokasi. Pada lokasi tunggal, `0` membuka input koordinat
+   manual. Pada multi-lokasi, pilih semua lokasi atau beberapa nomor seperti
+   `1,3,5-10`.
+3. Masukkan bulan dan tahun Hijriah, lalu pilih **`1` = sunset,
+   `2` = optimal**, dan offset hari (`0` untuk tanggal hasil hisab).
+4. Pilih atmosfer **`1` = ECMWF IFS, `2` = MERRA-2, `3` = manual**.
+   Input manual meminta RH, suhu, dan tekanan.
+5. Ikuti pilihan koreksi bias dan parameter teleskop. Enter pada pertanyaan
+   parameter default memakai baseline F bersama `2.0`.
+6. Pilih penyimpanan Excel/grafik ketika ditawarkan. Keluaran berada
+   di `outputs/`.
+
+Multi-lokasi memakai pilihan bulan/tahun, mode, dan konfigurasi yang sama
+untuk seluruh lokasi yang dipilih. Cuaca manual juga sama; sumber API
+mengambil cuaca sesuai lokasi/waktu masing-masing. Contoh lengkap ada pada
+[panduan terminal](docs/RUNNING.md).
+
+Untuk dataset penelitian, jalankan peluncur batch tersendiri:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_batch.py
+```
+
+Batch memakai 278 kasus yang sudah tersimpan dalam dataset, dengan periode
+dan lokasi masing-masing. Pilihan mode batch adalah **`1` = optimal,
+`2` = sunset**. Excel dan CSV disimpan otomatis setelah perhitungan. Lihat
+[bagian batch dataset](docs/RUNNING.md#4-batch-dataset-observasi-penelitian).
 
 ### 12.2 Penggunaan sebagai Library
 
 ```python
-from core_crescent_visibility import HilalVisibilityCalculator
+from hilal_visibility import HilalVisibilityCalculator
 
 calc = HilalVisibilityCalculator(
     nama_tempat="UIN Walisongo",
@@ -428,10 +492,10 @@ hasil = calc.jalankan_perhitungan_lengkap(
 )
 
 # Simpan ke Excel
-calc.simpan_ke_excel("output/hasil_ramadhan_1444.xlsx")
+calc.simpan_ke_excel("outputs/hasil_ramadhan_1444.xlsx")
 
 # Simpan grafik visibility margin (hanya mode optimal)
-calc.plot_visibility_margin(save_path="output/grafik_ramadhan_1444.png")
+calc.plot_visibility_margin(save_path="outputs/grafik_ramadhan_1444.png")
 ```
 
 ### 12.3 Parameter Input Manual Atmosfer
@@ -527,6 +591,8 @@ Parameter perantara direkam saat perhitungan pada `model_trace`; ekspor tidak me
 
 Ringkasan, data timestep, dan ekspor multi-lokasi menyimpan `k_v`, `extinction_mag_v`, dan `transmission_v` secara terpisah untuk sunset serta waktu optimal. CSV batch mempertahankan `kV_Sunset`/`kV_BT` dan menambah `extinction_mag_v_Sunset`, `transmission_v_Sunset`, `extinction_mag_v_BT`, `transmission_v_BT`, serta pasangan waktu optimal naked eye. Transmisi disimpan dengan presisi penuh agar nilai kecil tetap terbaca. Margin nonfinite disimpan sebagai teks di Excel; grafik memakai nilai finite untuk menentukan sumbu.
 
+Excel tunggal menampilkan regime, flag extrapolasi achromatic, serta kontrak perbandingan `F` pada Rantai Model dan Timestep Data. CSV batch menambahkan diagnostik visual di akhir kolom; Excel batch menyimpan pasangan diagnostik yang sama pada worksheet **Diagnostik Visual**. Nilai diagnostik observasi gagal atau optimum yang tidak tersedia dibiarkan kosong.
+
 Ekspor batch Excel/CSV membiarkan kolom optimal kosong ketika tidak ada waktu optimal, termasuk altitude, atmosfer, margin, dan prediksinya. `None` tidak dibulatkan atau diganti angka nol. Observasi tanpa hasil teleskop yang dapat dibandingkan tidak masuk denominator kesesuaian deskriptif; jumlahnya ditampilkan pada ringkasan Excel. Margin `-inf` pada hasil evaluasi yang tersedia tetap berarti di bawah threshold, berbeda dari optimum yang tidak tersedia.
 
 ### 13.4 Pemeriksaan kontrak antar-model
@@ -534,12 +600,12 @@ Ekspor batch Excel/CSV membiarkan kolom optimal kosong ketika tidak ada waktu op
 Jalankan dari direktori utama sebelum batch observasi:
 
 ```bash
-python -X utf8 -m unittest discover -s tests -v
-python -X utf8 -m compileall -q Core tests
-python -X utf8 Core/crumey_validation.py
+.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
+.venv\Scripts\python.exe -X utf8 -m compileall -q src scripts tests
+.venv\Scripts\python.exe -X utf8 scripts/validate_crumey.py
 ```
 
-Tes antarmuka memeriksa $A_V=0 \Rightarrow T_V=1$, $A_V=1 \Rightarrow T_V=0.398107$, batas transmisi, increment contrast, batas visibilitas, kesamaan kontras teleskop, dan pemisahan fase/elongasi. Skrip diagnostik menghitung ulang LOS extinction dan transmisi untuk setiap variasi RH; RH 100% merupakan singularitas rumus aerosol dan tidak disertakan dalam scan sensitivitas.
+Tes antarmuka memeriksa $A_V=0 \Rightarrow T_V=1$, $A_V=1 \Rightarrow T_V=0.398107$, batas transmisi, increment contrast, batas visibilitas, kesamaan kontras teleskop, dan pemisahan fase/elongasi. Regresi tambahan mencakup RH kering/dekat saturasi, penolakan RH 100% termasuk hasil koreksi bias, pembulatan `acos`, pewarisan residual F melalui sunset/scan/refinement, dan diagnostik regime NE/teleskop. Skrip diagnostik menghitung ulang LOS extinction dan transmisi untuk setiap variasi RH; RH 100% berada di luar domain Schaefer dan tidak disertakan dalam scan sensitivitas.
 
 Tes geometri Bulan memeriksa semidiameter terhadap jarak, perbedaan toposentrik/geosentrik, datum WGS84, kesetaraan input UTC/lokal, hubungan fase–iluminasi–lebar, pemakaian geometri oleh kalkulator, dan operasi tanpa PyMeeus. Tes waktu/kalender mencakup mikrodetik, selisih bertanda, dan indeks Muharram 1442/1443 H sebelum referensi 1444 H; pemetaan tahun menggunakan `idx // 12`, termasuk offset tepat -12 dan -24 bulan. Contoh regresi Semarang (-6,917°, 110,348°, elevasi 89 m), 22 Maret 2023 17:42:15 WIB: jarak astrometrik WGS84 367.506,496 km dan semidiameter 0,2708688395° (16,25213037 arcmin), dibandingkan nilai jalur lama 0,2714801211°.
 
@@ -563,17 +629,19 @@ Pemeriksaan referensi rumus terpisah dari validasi empiris. Perbandingan Eq. 63 
 
 ### 13.5 Observasi dan kelayakan kalibrasi Crumey
 
-Menurut konfirmasi pemilik data, 278 label pada `Core/core_multi_location.py` berasal dari kamera/CCD melalui teleskop di [galeri BMKG](https://hilal.bmkg.go.id/gallery). Dataset berisi 139 label positif dan 139 negatif pada 26 tanggal, tanpa konfigurasi teleskop atau waktu pengamatan aktual. Nilai `+1` pada workbook sumber merupakan offset hari, bukan jam pengamatan. Karena Crumey memodelkan penglihatan manusia, dataset ini menghasilkan **perbandingan deskriptif lintas metode**, bukan kalibrasi atau validasi empiris ambang visual. Faktor `F` produksi tidak disetel terhadap label CCD.
+Menurut konfirmasi pemilik data, 278 label pada `src/hilal_visibility/batch.py` berasal dari kamera/CCD melalui teleskop di [galeri BMKG](https://hilal.bmkg.go.id/gallery). Dataset berisi 139 label positif dan 139 negatif pada 26 tanggal, tanpa konfigurasi teleskop atau waktu pengamatan aktual. Nilai `+1` pada workbook sumber merupakan offset hari, bukan jam pengamatan. Karena Crumey memodelkan penglihatan manusia, dataset ini menghasilkan **perbandingan deskriptif lintas metode**, bukan kalibrasi atau validasi empiris ambang visual. Faktor `F` produksi tidak disetel terhadap label CCD.
 
-`Core/crumey_empirical_validation.py` menyimpan input atmosfer IFS nyata, provenance, konfigurasi referensi 100 mm/50×, prediksi per kasus, serta sensitivitas fraksi luas 1, 0.5, 0.25, dan 0.1 dengan luminansi excess tetap. Fraksi luas adalah skenario sensitivitas, bukan hasil kalibrasi bentuk hilal. Kalibrasi visual hanya menerima label boolean dari percobaan visual yang terverifikasi, rentang waktu aktual, serta konfigurasi optik aktual untuk pengamatan teleskop. Evaluasi menahan seluruh campaign/lunasi di luar training bila tersedia, dengan fallback per tanggal, untuk mencegah kebocoran antar lokasi atau hari dalam campaign yang sama.
+`scripts/compare_crumey_observations.py` menyimpan input atmosfer IFS nyata, provenance, konfigurasi referensi 100 mm/50×, prediksi per kasus, serta sensitivitas fraksi luas 1, 0.5, 0.25, dan 0.1 dengan luminansi excess tetap. Fraksi luas adalah skenario sensitivitas, bukan hasil kalibrasi bentuk hilal. Kalibrasi visual hanya menerima label boolean dari percobaan visual yang terverifikasi, rentang waktu aktual, serta konfigurasi optik aktual untuk pengamatan teleskop. Evaluasi menahan seluruh campaign/lunasi di luar training bila tersedia, dengan fallback per tanggal, untuk mencegah kebocoran antar lokasi atau hari dalam campaign yang sama.
 
 ```bash
-python -X utf8 Core/crumey_empirical_validation.py --replay validation/crumey_empirical/raw_inputs.json --workers 4
+.venv\Scripts\python.exe -X utf8 scripts/compare_crumey_observations.py --replay validation/crumey_empirical/raw_inputs.json --workers 4
 ```
 
 Lihat [laporan perbaikan](docs/CRUMEY_IMPLEMENTATION_AND_VALIDATION.md) dan [laporan perbandingan observasi](validation/crumey_empirical/report.md) untuk hasil serta batas interpretasi.
 
 [Telaah kelemahan khusus hilal](docs/CRUMEY_HILAL_LIMITATIONS.md) merinci batas morfologi, phase law/jarak sumber, warna langit senja, adaptasi/pupil, resolusi/FOV, faktor pengamat, dan extrapolasi domain data. Konsistensi numerik dipisahkan dari validitas fisik asumsi sumber dan validasi penglihatan manusia.
+
+[Hasil peninjauan change4](docs/reviews/CHANGE4_REVIEW_AND_IMPLEMENTATION.md) mencatat keputusan, implementasi, dan pemeriksaan revisi domain RH serta kontrak residual F.
 
 Pada checkout ini, dispatcher atmosfer mendukung `ecmwf_ifs`, `merra2`, dan `manual`. Skrip batch memakai `SUMBER_ATMOSFER = "ecmwf_ifs"`; modul ERA5 tidak ada dalam checkout. Pengujian integrasi memakai atmosfer manual dan ephemeris DE440 lokal.
 
@@ -597,7 +665,7 @@ pip install -r requirements.txt
 
 ### Error: "File not found: de440s.bsp"
 **Solusi**:
-- Pastikan file `de440s.bsp` ada di direktori `Core/`
+- Pastikan file `de440s.bsp` ada di direktori `data/ephemeris/`
 - Download ulang dari JPL jika corrupt
 
 ### Warning: "Cache expired" di `.cache.sqlite`

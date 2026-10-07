@@ -12,9 +12,8 @@ from unittest.mock import patch
 
 from openpyxl import load_workbook
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Core'))
-from core_crescent_visibility import HilalVisibilityCalculator
-from full_rumus_crumey import mag_to_lux
+from hilal_visibility.calculator import HilalVisibilityCalculator
+from hilal_visibility.models.crumey import mag_to_lux
 
 
 class SingleExcelReportTests(unittest.TestCase):
@@ -99,6 +98,20 @@ class SingleExcelReportTests(unittest.TestCase):
             self.assertAlmostEqual(rows['DM[V]'][col - 1].value, expected, places=12)
             total = rows['B_night_nL'][col - 1].value + min(rows['B_twilight_nL'][col - 1].value, rows['B_daylight_nL'][col - 1].value)
             self.assertAlmostEqual(total / rows['B_sky'][col - 1].value, 1, places=12)
+
+    def test_exported_visual_diagnostics_use_each_methods_actual_background(self):
+        wb = self.export()
+        ws = wb['Rantai Model']
+        for col, expected in ((4, self.calc.hasil['model_trace']['naked_eye_coefficients']),
+                              (5, self.calc.hasil['model_trace']['telescope']['coefficients'])):
+            self.assertEqual(self.row(ws, 'regime')[col - 1].value, expected['regime'])
+            self.assertEqual(self.row(ws, 'achromatic_extrapolation')[col - 1].value,
+                             expected['achromatic_extrapolation'])
+        self.assertEqual(self.row(ws, 'F_comparison')[4].value, 'independent_residual_factors')
+        headers = [cell.value for cell in wb['Timestep Data'][1]]
+        for label in ('NE | Regime', 'TEL | Regime', 'NE | Extrapolasi achromatic',
+                      'TEL | Extrapolasi achromatic', 'Selisih Threshold (mag)'):
+            self.assertIn(label, headers)
 
     def test_disabled_telescope_and_unavailable_optima_are_blank(self):
         calc = deepcopy(self.calc)

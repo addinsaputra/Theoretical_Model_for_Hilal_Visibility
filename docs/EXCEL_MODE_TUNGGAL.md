@@ -24,8 +24,8 @@ Grafik memakai worksheet tersembunyi `_Data Grafik`, menyertakan hasil scan dan 
 Contoh yang dapat dibuat ulang memakai lokasi Semarang, Ramadhan 1444 H, ephemeris DE440s, dan **atmosfer manual** RH 75%, T 25 °C, P 1013.25 hPa. Teleskop referensi 100 mm, 50×. Contoh ini bukan hasil pengamatan aktual maupun kalibrasi.
 
 ```powershell
-.venv\Scripts\python.exe docs/generate_single_excel_example.py
-.venv\Scripts\python.exe docs/generate_single_excel_example.py --mode sunset
+.venv\Scripts\python.exe scripts/generate_single_excel_example.py
+.venv\Scripts\python.exe scripts/generate_single_excel_example.py --mode sunset
 ```
 
 Pemeriksaan regresi meliputi pemisahan kolom/waktu, angka numerik, identitas fluks fotometri, transmisi tunggal, throughput target/latar, luas tampak, field factor, pembentukan langit, hasil nonaktif/tidak tersedia, infinity dan ekspor tanpa perhitungan ulang. Kelulusan pemeriksaan tersebut tidak membuktikan validitas empiris asumsi hilal atau sensitivitas manusia. Label BMKG yang dikonfirmasi sebagai CCD tidak digunakan untuk mengkalibrasi model visual.

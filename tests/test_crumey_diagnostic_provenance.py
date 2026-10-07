@@ -15,10 +15,7 @@ from unittest.mock import patch
 import pandas as pd
 from openpyxl import load_workbook
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Core'))
-import analisis_diagnostik_crumey as diagnostic
-
-
+import hilal_visibility.studies.diagnostics as diagnostic
 class DiagnosticProvenanceTests(unittest.TestCase):
     @staticmethod
     def raw_row(no=1):

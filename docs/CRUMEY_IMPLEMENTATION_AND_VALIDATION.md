@@ -1,8 +1,13 @@
 # Perbaikan Crumey dan status validasi hilal — 5 Oktober 2026
 
-Implementasi mata telanjang dan teleskop kini memakai satu kontrak ambang increment luminansi. Konfigurasi optik diteruskan utuh selama pencarian waktu optimal, dan helper fotometri memakai zero point yang konsisten. Perbaikan ini menyelesaikan temuan implementasi utama pada [audit baseline](AUDIT_CRUMEY_2026-10-05.md). **Kelulusan pemeriksaan rumus tidak memvalidasi penglihatan manusia terhadap hilal.**
+Implementasi mata telanjang dan teleskop kini memakai satu kontrak ambang increment luminansi. Konfigurasi optik diteruskan utuh selama pencarian waktu optimal, dan helper fotometri memakai zero point yang konsisten. Perbaikan ini menyelesaikan temuan implementasi utama pada [audit baseline](reviews/AUDIT_CRUMEY_2026-10-05.md). **Kelulusan pemeriksaan rumus tidak memvalidasi penglihatan manusia terhadap hilal.**
 
 ## Perubahan implementasi
+
+Baseline aktif mata telanjang dan teleskop disamakan menjadi `F=2.0` pada
+7 Oktober 2026 atas permintaan pengguna. Angka perbandingan observasi di
+laporan ini berasal dari artefak dengan konfigurasi historis `F=1.8` dan
+belum dihitung ulang menggunakan baseline baru.
 
 | Masalah baseline | Perilaku setelah perbaikan |
 | --- | --- |
@@ -13,7 +18,7 @@ Implementasi mata telanjang dan teleskop kini memakai satu kontrak ambang increm
 | Obstruksi dikalikan sebagai skalar setelah pupil dipotong | Area annular dihitung setelah pemotongan pupil mata; optik terblokir memberi margin `-inf` tanpa crash |
 | Input fisik tidak valid menghasilkan NaN/threshold palsu | Pemeriksaan domain menolak input negatif, nonfinite, regime tidak sesuai, dan konfigurasi optik tidak fisik |
 
-File utama: `Core/full_rumus_crumey.py`, `Core/core_crescent_visibility.py`, dan `Core/telescope_limit.py`. Diagnostik memakai backend yang sama. Luas sabit bersama tetap mengikuti baseline elongasi, dihitung sebagai `pi*r²*sin(elongation/2)²` agar stabil dekat konjungsi. Ini stabilisasi numerik, bukan perubahan menjadi model morfologi/fase yang telah dikalibrasi.
+File utama: `src/hilal_visibility/models/crumey.py`, `src/hilal_visibility/calculator.py`, dan `src/hilal_visibility/models/telescope.py`. Diagnostik memakai backend yang sama. Luas sabit bersama tetap mengikuti baseline elongasi, dihitung sebagai `pi*r²*sin(elongation/2)²` agar stabil dekat konjungsi. Ini stabilisasi numerik, bukan perubahan menjadi model morfologi/fase yang telah dikalibrasi.
 
 Telaah lanjutan juga menyamakan fotometri sumber Kastner dengan zero point V: rasio flux memakai `10**(0.4*(10-m))`, dan `S10_TO_NL=0.26195630393381236` diturunkan dari flux bintang V=10 per deg². Pembulatan lama `2.51`/`0.263` menghasilkan residual sekitar 0.007–0.009 mag. Koefisien phase law tetap. [Laporan kelemahan hilal](CRUMEY_HILAL_LIMITATIONS.md) membahas domain phase law, jarak, morfologi, warna, adaptasi, optik, dan interpretasi threshold secara terpisah dari konsistensi satuan.
 
@@ -62,8 +67,8 @@ Jalankan:
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -X utf8 -m compileall -q Core tests docs
-.\.venv\Scripts\python.exe -X utf8 Core/crumey_validation.py
+.\.venv\Scripts\python.exe -X utf8 -m compileall -q src scripts tests docs
+.\.venv\Scripts\python.exe -X utf8 scripts/validate_crumey.py
 .\.venv\Scripts\python.exe -X utf8 docs/audit_crumey_repro.py
 ```
 
@@ -72,8 +77,8 @@ Hasil verifikasi pada checkout ini:
 | Pemeriksaan | Hasil |
 | --- | --- |
 | Suite `unittest` lengkap | **145/145 lulus** |
-| `Core/crumey_validation.py` | **100/100 lulus**, exit code 0 |
-| Verifikasi bawaan `Core/full_rumus_crumey.py` | **11/11 lulus** |
+| `scripts/validate_crumey.py` | **100/100 lulus**, exit code 0 |
+| Verifikasi bawaan `src/hilal_visibility/models/crumey.py` | **11/11 lulus** |
 | `compileall` untuk Core/tests/docs | Lulus |
 | Probe implementasi aktif | Exit code 0; residual identitas fotometri 0 hingga `1.8e-15 mag` |
 

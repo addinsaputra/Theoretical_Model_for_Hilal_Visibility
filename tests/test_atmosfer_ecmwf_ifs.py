@@ -1,3 +1,4 @@
+from hilal_visibility import cli
 """Regression tests for IFS requests, hourly interpolation, and failure exports."""
 
 import contextlib
@@ -16,14 +17,11 @@ import pandas as pd
 import requests
 from openpyxl import load_workbook
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Core'))
 
-import atmosfer_ecmwf_ifs as weather
-from atmosphere_provenance import atmosphere_audit_record, save_atmosphere_provenance
-import core_crescent_visibility as core
-import core_multi_location as batch
-
-
+import hilal_visibility.atmosphere.ifs as weather
+from hilal_visibility.atmosphere.provenance import atmosphere_audit_record, save_atmosphere_provenance
+import hilal_visibility.calculator as core
+import hilal_visibility.batch as batch
 UTC = timezone.utc
 WIB = timezone(timedelta(hours=7))
 LOCATION = weather.ObservingLocation('Uji', -6.97, 110.42, 1258.0, 'Asia/Jakarta')
@@ -290,7 +288,7 @@ class PipelineTests(unittest.TestCase):
             with self.subTest(inputs=inputs):
                 with patch('builtins.input', side_effect=inputs):
                     with contextlib.redirect_stdout(io.StringIO()):
-                        self.assertEqual(core._input_sumber_atmosfer(), expected)
+                        self.assertEqual(cli._input_sumber_atmosfer(), expected)
 
     def test_api_failure_propagates_for_each_source(self):
         cases = (
