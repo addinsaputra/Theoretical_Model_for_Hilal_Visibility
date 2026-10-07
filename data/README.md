@@ -8,5 +8,8 @@
   digunakan untuk perbandingan deskriptif lintas metode.
 
 Koordinat, tanggal, label dan nilai data dipertahankan saat migrasi.
+Keterangan offset dari pemilik dataset memakai tanggal ijtima **WIB** sebagai
+H+0 untuk semua lokasi. Kolom tanggal berisi hari pengamatan yang sudah
+dipilih; program tidak menambahkan offset lagi pada tanggal tersebut.
 `hilal_visibility.paths` menyelesaikan lokasi file berdasarkan checkout,
 sehingga program dapat dijalankan dari direktori kerja lain.

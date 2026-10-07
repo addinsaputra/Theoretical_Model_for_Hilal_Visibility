@@ -44,8 +44,9 @@ Ikuti menu berikut:
    bujur dan elevasi lokasi sendiri.
 3. Masukkan nomor bulan Hijriah (`1–12`) dan tahun Hijriah.
 4. Pilih mode perhitungan: `1` = **sunset**, `2` = **optimal**.
-5. Masukkan offset hari. `0` berarti tanggal pengamatan hasil hisab;
-   `1` berarti satu hari setelahnya.
+5. Masukkan offset hari. `0` berarti tanggal ijtima dalam **WIB**;
+   `1` berarti satu tanggal setelahnya. Acuan ini sama untuk semua lokasi,
+   sementara sunset dan waktu hasil tetap memakai zona waktu lokasi.
 6. Pilih sumber atmosfer: `1` = ECMWF IFS, `2` = MERRA-2,
    `3` = input manual. Pada input manual, isi RH, suhu dan tekanan.
 7. Ikuti pilihan koreksi bias jika memakai sumber API.
@@ -116,6 +117,32 @@ Program menjalankan 278 kasus dari
 Dataset menyediakan lokasi, periode Hijriah dan label observasi. Menu
 batch meminta konfigurasi perhitungan, sumber atmosfer, F, parameter
 teleskop, interval pencarian waktu dan koreksi bias.
+
+Batch memakai **bulan/tahun Hijriah sebagai acuan ephemeris** untuk menghitung
+ijtima. **H+0 adalah tanggal kalender ijtima dalam WIB (`Asia/Jakarta`), dengan
+awal hari 00:00 WIB, untuk semua lokasi.** Konvensi ini mengikuti pencatatan
+offset oleh pemilik dataset BMKG. H+0 memakai tanggal WIB yang sama, meskipun
+ijtima lokal di WIT sudah melewati tengah malam. Tanggal pengamatan dalam
+dataset yang berada dalam H-2 sampai H+2 dipakai
+untuk menentukan offset setiap kasus, sehingga H+0/H+1 dapat tercampur tanpa
+offset seragam untuk 278 kasus. Jika tanggal dataset jauh dari acuan tersebut,
+program memakai H+0 dari ephemeris. Contohnya, periode `1/1444` dengan tanggal
+dataset `2022-06-29` dihitung pada `2022-07-29`; tanggal asli tetap dicatat.
+Tanggal terpilih menentukan sunset, cuaca, dan pencarian waktu optimal di
+zona waktu lokal masing-masing lokasi. Tanggal dataset yang sudah benar
+dipakai langsung; offset tidak ditambahkan lagi pada tanggal tersebut.
+Contoh: ijtima Jumadilawal 1448 jatuh pada 10 Oktober 2026 malam WIB atau
+11 Oktober dini hari WIT. Acuan H+0 tetap **10 Oktober** untuk semua lokasi;
+pengamatan **H+1 berarti 11 Oktober**, baik di WIB, WITA, maupun WIT.
+Terminal menampilkan offset per kasus; CSV dan sheet Excel `Tanggal Pengamatan`
+memuat tanggal model, acuan H+0, offset, kecocokan, tanggal dataset asli, serta
+sumber pemilihan tanggal, serta zona acuan H+0. Jika tanggal hitung berbeda dari tanggal terpilih,
+kasus ditandai gagal dan tidak dipakai untuk perbandingan.
+
+Kolom waktu optimal tetap bisa kosong bila tidak ada timestep yang memenuhi
+altitude minimum Bulan (default `2°`). Itu berarti tidak ada hasil optimal
+pada batas pencarian yang dipilih; periksa kolom tanggal untuk membedakannya
+dari kesalahan pemilihan hari pengamatan.
 
 **Urutan pilihan mode pada batch adalah `1` = optimal, `2` = sunset**.
 Tekan Enter untuk nilai default yang tercantum di setiap pertanyaan.

@@ -298,6 +298,7 @@ def _input_sheet(calc, ws):
         ('Bujur', 'longitude', 'deg', calc.bujur, 'Positif timur.'),
         ('Elevasi', 'H', 'm', calc.elevasi, 'Ketinggian lokasi di atas muka laut.'),
         ('Zona waktu', 'timezone', '—', calc.timezone_str, 'Seluruh waktu lokal di workbook menggunakan zona ini.'),
+        ('Zona acuan H+0', 'timezone_H0', '—', h.get('h0_reference_timezone', 'Asia/Jakarta'), 'Tanggal ijtima WIB adalah H+0 untuk semua lokasi; batas hari 00:00 WIB.'),
         ('Bulan Hijri', 'bulan', '—', calc.bulan_hijri, ''),
         ('Tahun Hijri', 'tahun', '—', calc.tahun_hijri, ''),
         ('Offset hari', 'offset', 'hari', calc.delta_day_offset, 'Offset tanggal; bukan jam pengamatan.'),

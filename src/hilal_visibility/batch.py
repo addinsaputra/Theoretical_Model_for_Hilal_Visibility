@@ -36,6 +36,7 @@ import os
 import sys
 import time
 import traceback
+from datetime import date
 from typing import List
 from hilal_visibility.paths import OUTPUT_DIR
 from hilal_visibility.console import configure_console_encoding
@@ -43,7 +44,10 @@ from hilal_visibility.console import configure_console_encoding
 from hilal_visibility.calculator import (
     HilalVisibilityCalculator,
     tentukan_timezone_indonesia,
+    hisab_observation_date,
+    H0_REFERENCE_TIMEZONE,
 )
+from hilal_visibility.ephemeris import newmoon_hijri_month_utc
 from hilal_visibility.atmosphere.provenance import atmosphere_audit_record, save_atmosphere_provenance
 from hilal_visibility.atmosphere.ifs import ARCHIVE_URL, IFS_MODEL, IFS_PRODUCT_NAME
 from hilal_visibility.models.crumey import DEFAULT_VISUAL_FIELD_FACTOR
@@ -71,6 +75,16 @@ VISUAL_DIAGNOSTIC_COLUMNS = (
     ('Threshold_Difference_Sunset_mag', 'threshold_difference_mag'),
     ('Threshold_Difference_Tel_Optimal_mag', 'optimal_threshold_difference_mag'),
     ('F_Comparison', 'field_factor_comparison'),
+)
+
+DATE_DIAGNOSTIC_COLUMNS = (
+    ('Tanggal_Model', 'tanggal_model'),
+    ('Tanggal_Hisab_H0', 'tanggal_hisab'),
+    ('Offset_Hari_dari_Hisab', 'delta_day_offset'),
+    ('Tanggal_Cocok', 'tanggal_cocok'),
+    ('Tanggal_Dataset_Asli', 'tanggal_dataset'),
+    ('Sumber_Tanggal', 'sumber_tanggal'),
+    ('Zona_Acuan_H0', 'h0_reference_timezone'),
 )
 
 
@@ -258,8 +272,24 @@ def parse_obs(entry: tuple) -> dict:
 # BATCH PROCESSING
 # ═══════════════════════════════════════════════════════════════════
 
+def select_observation_date(obs):
+    """Hijri ephemeris determines the shared WIB date; dataset dates supply offsets.
+
+    The H-2..H+2 range matches the interactive observing-day menu. A Gregorian
+    date outside that campaign cannot replace the Hijri lunation supplied by
+    the dataset owner, so retain H+0 and audit the original Gregorian date.
+    """
+    conjunction = newmoon_hijri_month_utc(obs['tahun_hijri'], obs['bulan_hijri'])
+    reference = hisab_observation_date(conjunction)
+    original = date.fromisoformat(obs['tanggal'])
+    offset = (original - reference).days
+    if -2 <= offset <= 2:
+        return original, 'ephemeris_hijri_plus_offset_dataset'
+    return reference, 'ephemeris_hijri'
+
+
 def run_single_observation(obs: dict, verbose: bool = True) -> dict:
-    """Jalankan model untuk satu observasi.
+    """Jalankan model pada acuan ephemeris Hijriah + offset observasi.
 
     Returns
     -------
@@ -279,6 +309,8 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
         print(f"{'═' * 70}")
 
     try:
+        selected_date, date_source = select_observation_date(obs)
+        tanggal = selected_date.isoformat()
         calc = HilalVisibilityCalculator(
             nama_tempat=nama,
             lintang=obs['lat'],
@@ -288,6 +320,7 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
             bulan_hijri=obs['bulan_hijri'],
             tahun_hijri=obs['tahun_hijri'],
             delta_day_offset=0,
+            observation_date=selected_date,
             bias_t=obs['bias_t'],
             bias_rh=obs['bias_rh'],
             sumber_atmosfer=SUMBER_ATMOSFER,
@@ -310,14 +343,21 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
         else:
             tgl_model_str = "?"
 
-        # Verifikasi tanggal
+        # Jangan memakai hasil pada hari lain sebagai perbandingan observasi.
         tgl_cocok = (tgl_model_str == tanggal)
-        if not tgl_cocok and verbose:
-            print(f"\n  ⚠ TANGGAL TIDAK COCOK: model={tgl_model_str}, "
-                  f"observasi={tanggal}")
+        sunset_local_dt = hasil.get('sunset_local')
+        if not tgl_cocok or sunset_local_dt is None or sunset_local_dt.date().isoformat() != tanggal:
+            raise ValueError(f'TANGGAL TIDAK COCOK: model={tgl_model_str}, observasi={tanggal}')
+        tanggal_hisab = hasil.get('tanggal_hisab')
+        tanggal_hisab_str = tanggal_hisab.date().isoformat() if tanggal_hisab else None
+        offset_hari = hasil.get('delta_day_offset')
+        if verbose:
+            offset_label = f'H{offset_hari:+d}' if offset_hari is not None else 'H?'
+            print(f'\n  Tanggal pengamatan: {tanggal} | Acuan H+0 WIB: {tanggal_hisab_str} | {offset_label}')
+            if tanggal != obs['tanggal']:
+                print(f"  Tanggal dataset asli {obs['tanggal']} di luar H-2..H+2; memakai ephemeris Hijriah.")
 
         # Ambil nilai datetime untuk parsing ke time
-        sunset_local_dt = hasil.get('sunset_local')
         optimal_time_ne_dt = hasil.get('optimal_time_ne') if CALC_MODE == "optimal" else None
         optimal_time_tel_dt = hasil.get('optimal_time_tel') if CALC_MODE == "optimal" else None
 
@@ -329,6 +369,11 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
             'tanggal_obs': tanggal,
             'tanggal_model': tgl_model_str,
             'tanggal_cocok': tgl_cocok,
+            'tanggal_hisab': tanggal_hisab_str,
+            'delta_day_offset': offset_hari,
+            'tanggal_dataset': obs['tanggal'],
+            'sumber_tanggal': date_source,
+            'h0_reference_timezone': H0_REFERENCE_TIMEZONE,
             'bulan_hijri': obs['bulan_hijri'],
             'tahun_hijri': obs['tahun_hijri'],
             'lat': obs['lat'],
@@ -474,7 +519,14 @@ def run_single_observation(obs: dict, verbose: bool = True) -> dict:
             'no': no,
             'nama': nama,
             'tanggal_obs': tanggal,
-            'tanggal_model': '?',
+            'tanggal_dataset': obs['tanggal'],
+            'sumber_tanggal': date_source if 'date_source' in locals() else None,
+            'h0_reference_timezone': H0_REFERENCE_TIMEZONE,
+            'tanggal_model': (calc.hasil['tanggal_pengamatan'].date().isoformat()
+                              if 'calc' in locals() and calc.hasil.get('tanggal_pengamatan') else '?'),
+            'tanggal_hisab': (calc.hasil['tanggal_hisab'].date().isoformat()
+                              if 'calc' in locals() and calc.hasil.get('tanggal_hisab') else None),
+            'delta_day_offset': calc.hasil.get('delta_day_offset') if 'calc' in locals() else None,
             'tanggal_cocok': False,
             'bulan_hijri': obs['bulan_hijri'],
             'tahun_hijri': obs['tahun_hijri'],
@@ -508,6 +560,8 @@ def run_batch(bias_mode: str = '2', manual_bias_t: float = 0.0, manual_bias_rh: 
     n_tanggal = len({entry[1] for entry in OBSERVATIONS})
     print(f"  {N_OBS} data observasi pada {n_tanggal} tanggal pengamatan")
     print(f"  Mode: {CALC_MODE}  |  Atmosfer: {SUMBER_ATMOSFER}")
+    print('  Acuan H+0: tanggal ijtima WIB (00:00 Asia/Jakarta), sama untuk semua lokasi')
+    print('  Waktu pengamatan: sunset dalam zona waktu lokal masing-masing lokasi')
     if SUMBER_ATMOSFER == 'ecmwf_ifs':
         print(f"  Produk: {IFS_PRODUCT_NAME}")
         print(f"  API: {ARCHIVE_URL}")
@@ -1045,6 +1099,10 @@ def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Tanp
 
     summary_data = [
         ("KONFIGURASI", ""),
+        ("Acuan Tanggal", "Tanggal ijtima WIB dari ephemeris bulan/tahun Hijriah; tanggal dataset dalam H-2..H+2 menentukan offset"),
+        ("Definisi H+0", "Tanggal kalender ijtima WIB, dengan awal hari 00:00 WIB; sama untuk semua lokasi"),
+        ("Zona Acuan H+0", H0_REFERENCE_TIMEZONE),
+        ("Tanggal Dataset di Luar Acuan", "Memakai H+0 ephemeris; tanggal dataset asli dicatat pada sheet Tanggal Pengamatan"),
         ("Metode Label Observasi", OBSERVATION_METHOD),
         ("Sumber Label Observasi", OBSERVATION_SOURCE),
         ("Cakupan Perbandingan", "Lintas-metode/deskriptif; bukan validasi visual"),
@@ -1113,6 +1171,26 @@ def save_to_excel(results: List[dict], filepath: str, bias_mode_str: str = "Tanp
         visual.column_dimensions[cell.column_letter].width = 28
     visual.row_dimensions[1].height = 48
 
+    dates = wb.create_sheet('Tanggal Pengamatan')
+    dates.append(['No', 'Lokasi', 'Tanggal observasi', 'Tanggal model',
+                  'Acuan H+0 WIB', 'Offset hari', 'Tanggal cocok', 'Tanggal dataset asli', 'Sumber tanggal', 'Zona acuan H+0'])
+    for result in results:
+        dates.append([result.get('no'), result.get('nama'), result.get('tanggal_obs'),
+                      *[result.get(key) for _, key in DATE_DIAGNOSTIC_COLUMNS]])
+    dates.freeze_panes = 'C2'
+    dates.auto_filter.ref = dates.dimensions
+    for cell in dates[1]:
+        cell.font = ringkasan_hdr_font
+        cell.fill = meta_fill
+        cell.alignment = Alignment(wrap_text=True, vertical='center')
+        dates.column_dimensions[cell.column_letter].width = 18
+    dates.column_dimensions['A'].width = 8
+    dates.column_dimensions['B'].width = 50
+    dates.column_dimensions['H'].width = 24
+    dates.column_dimensions['I'].width = 45
+    dates.column_dimensions['J'].width = 24
+    dates.row_dimensions[1].height = 32
+
     # Save
     out_dir = os.path.dirname(filepath)
     if out_dir:
@@ -1131,7 +1209,16 @@ def _save_batch_atmosphere_provenance(results, filepath):
         atmosphere_audit_record(
             r.get('nama', ''), r.get('sumber_atmosfer', SUMBER_ATMOSFER),
             r.get('success', False), r, r.get('error'),
-        ) for r in results
+        ) | {
+            'observation_date': r.get('tanggal_obs'),
+            'model_date': r.get('tanggal_model'),
+            'hisab_reference_date': r.get('tanggal_hisab'),
+            'offset_days': r.get('delta_day_offset'),
+            'dates_match': r.get('tanggal_cocok'),
+            'original_dataset_date': r.get('tanggal_dataset'),
+            'date_source': r.get('sumber_tanggal'),
+            'h0_reference_timezone': r.get('h0_reference_timezone', H0_REFERENCE_TIMEZONE),
+        } for r in results
     ])
 
 
@@ -1174,6 +1261,7 @@ def save_to_csv(results: List[dict], filepath: str):
         'Observation_Method', 'Observation_Source', 'Comparison_Scope',
         'Actual_Telescope_Config_Available', 'Actual_Observation_Time_Available',
         *[label for label, _ in VISUAL_DIAGNOSTIC_COLUMNS],
+        *[label for label, _ in DATE_DIAGNOSTIC_COLUMNS],
     ]
 
     out_dir = os.path.dirname(filepath)
@@ -1281,6 +1369,7 @@ def save_to_csv(results: List[dict], filepath: str):
                              'moon_distance_km_BT', 'Phase_Angle_BT', 'P_Tel_Optimal'):
                     row[column_positions[name]] = ''
             row.extend(_visual_diagnostic_values(r))
+            row.extend(r.get(key) for _, key in DATE_DIAGNOSTIC_COLUMNS)
             writer.writerow(row)
 
     _save_batch_atmosphere_provenance(results, filepath)

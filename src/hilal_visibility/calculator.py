@@ -1,6 +1,6 @@
 """Crescent calculation API, independent of interactive input workflows."""
 import math
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from typing import Dict, Any, Optional, Tuple
 import os
 import pandas as pd
@@ -152,6 +152,20 @@ def deg_to_dms(deg: float) -> str:
     return f"{sign}{d}° {m}' {s:.2f}\""
 
 
+H0_REFERENCE_TIMEZONE = 'Asia/Jakarta'
+
+
+def hisab_observation_date(ijtima_utc: datetime) -> date:
+    """H+0 is the conjunction's WIB calendar date, shared by every location.
+
+    The dataset owner's offsets use WIB days beginning at 00:00. Observer
+    timezone and sunset determine the physical observing time separately.
+    """
+    if ijtima_utc.tzinfo is None or ijtima_utc.utcoffset() is None:
+        raise ValueError('Waktu ijtima harus berzona waktu')
+    return convert_utc_to_localtime(H0_REFERENCE_TIMEZONE, utc_datetime=ijtima_utc).date()
+
+
 class HilalVisibilityCalculator:
     """Kelas utama untuk kalkulasi visibilitas hilal"""
     
@@ -176,7 +190,8 @@ class HilalVisibilityCalculator:
                  sumber_atmosfer: str = 'ecmwf_ifs',
                  manual_rh: float = 80.0,
                  manual_t: float = 25.0,
-                 manual_p: float = 1013.25):
+                 manual_p: float = 1013.25,
+                 *, observation_date: Optional[date] = None):
         """
         Inisialisasi kalkulator visibilitas hilal.
 
@@ -210,7 +225,17 @@ class HilalVisibilityCalculator:
             Suhu manual (°C) jika sumber='manual'
         manual_p : float
             Tekanan manual (mbar) jika sumber='manual'
+        observation_date : datetime.date or None
+            Tanggal lokal observasi yang harus dihitung. Jika diberikan,
+            tanggal ini menentukan sunset, cuaca dan pencarian waktu optimal;
+            delta_day_offset harus 0. Jika None, gunakan aturan hisab + offset.
         """
+        if observation_date is not None:
+            if not isinstance(observation_date, date) or isinstance(observation_date, datetime):
+                raise TypeError('observation_date harus datetime.date (tanggal lokal observasi)')
+            if delta_day_offset != 0:
+                raise ValueError('Pilih observation_date atau delta_day_offset, bukan keduanya')
+        self.observation_date = observation_date
         self.nama_tempat = nama_tempat
         self.lintang = lintang
         self.bujur = bujur
@@ -411,19 +436,20 @@ class HilalVisibilityCalculator:
         4. Data RH dan T digunakan untuk perhitungan sky brightness
 
         ATURAN HISAB:
-        1. Konversi ijtima UTC ke waktu lokal
-        2. Jika ijtima lokal terjadi sebelum jam 12:00 (tengah malam - siang):
-           - Gunakan tanggal ijtima lokal untuk pengamatan (sore hari itu)
-        3. Jika ijtima lokal terjadi setelah jam 12:00 (siang - tengah malam):
-           - Bandingkan dengan sunset lokal sore hari itu
-           - Jika ijtima < sunset: amati hari berikutnya
-           - Jika ijtima >= sunset: amati hari yang sama
+        1. Konversi ijtima UTC ke WIB (Asia/Jakarta) untuk semua lokasi
+        2. H+0 adalah tanggal kalender ijtima WIB, dengan awal hari 00:00 WIB
+        3. Tanggal pengamatan = H+0 + offset, atau observation_date yang diberikan
+        4. Sunset dan atmosfer dihitung di zona waktu lokal lokasi pengamatan
 
         Contoh untuk kasus Muharram 1444 (29 Juli 2022):
         - Ijtima UTC: 2022-07-28 17:55:02
         - Ijtima Lokal (WIB): 2022-07-29 00:55:02
-        - Karena ijtima lokal (00:55) < 12:00, maka pengamatan dilakukan pada 29 Juli 2022 sore
+        - Karena tanggal ijtima WIB adalah 29 Juli, H+0 adalah tanggal 29 Juli
         - Sunset 29 Juli sore: ~17:30 WIB -> Bulan sudah cukup tinggi untuk diamati
+
+        Untuk batch dengan observation_date, aturan di atas menjadi acuan H+0.
+        Sunset, atmosfer dan pencarian optimal mengikuti tanggal terpilih,
+        dengan selisih terhadap H+0 disimpan sebagai delta_day_offset.
 
         Parameters:
         -----------
@@ -443,31 +469,20 @@ class HilalVisibilityCalculator:
         pressure : float
             Tekanan udara dalam mbar (dari API)
         """
-        # Konversi ijtima ke waktu lokal
-        ijtima_local = convert_utc_to_localtime(self.timezone_str, utc_datetime=ijtima_utc)
+        tanggal_pengamatan = hisab_observation_date(ijtima_utc)
 
-        # Aturan sederhana berdasarkan jam ijtima lokal
-        if ijtima_local.hour < 12:
-            # Ijtima terjadi sebelum jam 12:00 (tengah malam sampai sebelum siang)
-            tanggal_pengamatan = ijtima_local.date()
+        # Batch menetapkan tanggal terpilih sebelum mengambil cuaca atau
+        # mencari waktu optimal. Simpan H+0 untuk mengaudit selisih harinya.
+        tanggal_hisab = tanggal_pengamatan
+        if self.observation_date is not None:
+            tanggal_pengamatan = self.observation_date
+            self.delta_day_offset = (tanggal_pengamatan - tanggal_hisab).days
         else:
-            # Ijtima terjadi setelah jam 12:00 (siang sampai tengah malam)
-            # Gunakan sunrise_sunset_local untuk estimasi sunset
-            _, sunset_local_ijtima = sunrise_sunset_local(
-                self.location,
-                self.timezone_str,
-                year=ijtima_utc.year,
-                month=ijtima_utc.month,
-                day=ijtima_utc.day
-            )
-
-            if ijtima_local < sunset_local_ijtima:
-                tanggal_pengamatan = ijtima_local.date() + timedelta(days=1)
-            else:
-                tanggal_pengamatan = ijtima_local.date()
-
-        # Terapkan delta day offset
-        tanggal_pengamatan += timedelta(days=self.delta_day_offset)
+            tanggal_pengamatan += timedelta(days=self.delta_day_offset)
+        self.hasil['tanggal_hisab'] = datetime.combine(tanggal_hisab, datetime.min.time())
+        self.hasil['h0_reference_timezone'] = H0_REFERENCE_TIMEZONE
+        self.hasil['delta_day_offset'] = self.delta_day_offset
+        self.hasil['tanggal_pengamatan'] = datetime.combine(tanggal_pengamatan, datetime.min.time())
 
         # LANGKAH 1: Hitung ESTIMASI sunset untuk fetch weather
         # Gunakan default T dan P untuk estimasi awal (standard refraction)
